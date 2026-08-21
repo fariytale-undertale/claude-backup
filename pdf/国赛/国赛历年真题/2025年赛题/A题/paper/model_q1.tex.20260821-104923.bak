@@ -1,0 +1,35 @@
+\subsection{问题一：给定参数下的遮蔽时长}
+
+\subsubsection{模型建立}
+问题一所有参数给定，FY1 以 120\,m/s 朝向假目标方向飞行，即水平方向为 $x$ 轴负向、航向 $\theta=180^\circ$，受领任务 $t_d=1.5$\,s 后投放，引信延迟 $\Delta t_b=3.6$\,s。由式 \eqref{eq:burst} 计算投放点与起爆点，由式 \eqref{eq:cloud} 给出云团球心轨迹，代入遮蔽判定函数在时间轴上扫描，求对 M1 的遮蔽时长。
+
+\subsubsection{模型求解}
+由式 \eqref{eq:burst}，投放点 $\boldsymbol{P}_d=(17620,0,1800)$，起爆点 $\boldsymbol{P}_b=(17188,0,1736.5)$，起爆时刻 $t_b=5.1$\,s。在 $[t_b,t_b+20]$ 内按 0.005\,s 步长扫描，遮蔽时长结果见表 \ref{tab:q1}。图 \ref{fig:q1} 给出 M1 位置随时间变化曲线与遮蔽区间。
+
+\begin{table}[H]
+\centering
+\caption{问题一求解结果}
+\label{tab:q1}
+\begin{tabular}{cccc}
+\toprule
+投放点 & 起爆点 & 起爆时刻 $t_b$ & 遮蔽区间 \\
+\midrule
+$(17620,0,1800)$ & $(17188,0,1736.5)$ & 5.1\,s & $[8.06,9.45]$\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+有效遮蔽时长 $T=1.390$\,s（体判据）。作为对比，采用目标中心点 $(0,200,5)$ 视线被挡的点判据，遮蔽时长为 1.435\,s，比体判据高 3.24\%。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{output/figures/q1_shield.png}
+\caption{问题一：M1 位置随时间变化与遮蔽区间}
+\label{fig:q1}
+\end{figure}
+
+\subsubsection{结果分析}
+遮蔽窗口 $[8.06,9.45]$\,s 对应导弹从 $x\approx 17594$\,m 飞至 $x\approx 17179$\,m 的时段，而云团球心位于 $x=17188$\,m，即导弹掠过云团附近的视线被遮蔽。物理上，遮蔽始于云团球盘接触导弹--目标视线，终于导弹飞越云团位置、云团落到导弹后方，与几何直觉一致。1.4\,s 量级对应导弹以 300\,m/s 穿越约 420\,m 的遮蔽窗口，量级合理。
+
+\subsubsection{结果检验与灵敏度}
+锚点校验：投放点 $x$ 方向位移 $120\times1.5=180$\,m、起爆点 $x$ 方向位移 $120\times3.6=432$\,m、下沉 $\tfrac12\times9.8\times3.6^2=63.5$\,m，与式 \eqref{eq:burst} 一致。判据口径对比：点判据遮蔽更早开始、时长更高，体判据更严格、物理上更合理。半径敏感度：云团半径取 5\,m 时遮蔽时长骤降至 0.100\,s，说明 10\,m 范围的半径口径对结果影响显著，本文按半径 10\,m 执行。采样收敛性：周向采样 24/48/96/144 档遮蔽时长均为 1.3900\,s，判定函数数值稳定。

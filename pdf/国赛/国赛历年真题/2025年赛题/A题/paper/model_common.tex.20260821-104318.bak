@@ -1,0 +1,57 @@
+\subsection{建模准备：坐标系与遮蔽判据}
+
+本题的建模与求解综合运用运动学建模、几何判定与启发式优化方法 \cite{si2011}。以假目标为原点建立右手系，$xy$ 平面为水平面，$z$ 轴竖直向上。真目标为半径 7\,m、高 10\,m 的圆柱体，轴线位于 $x=0$、$y=200$，底圆在 $z=0$ 平面上。三枚导弹初始位置分别为 M1$(20000,0,2000)$、M2$(19000,600,2100)$、M3$(18000,-600,1900)$，五架无人机初始位置按题面给定。总体求解思路如图 \ref{fig:flow} 所示。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{output/figures/q1_shield.png}
+\caption{总体求解思路}
+\label{fig:flow}
+\end{figure}
+
+\subsubsection{导弹运动方程}
+设导弹初始位置为 $\boldsymbol{M}_0$，飞行方向指向原点，则 $t$ 时刻位置为
+\begin{equation}
+\boldsymbol{M}(t) = \boldsymbol{M}_0 - v_m t\,\frac{\boldsymbol{M}_0}{|\boldsymbol{M}_0|}.
+\label{eq:missile}
+\end{equation}
+由 $\boldsymbol{M}_1$ 初始位置可得其飞行至假目标的时间约为 $|M_1|/v_m \approx 67.0$\,s。
+
+\subsubsection{干扰弹弹道方程}
+无人机等高度匀速飞行，干扰弹脱离瞬间继承无人机水平速度矢量 $\boldsymbol{v}_u$，此后仅受重力，起爆点为
+\begin{equation}
+\boldsymbol{P}_b = \boldsymbol{P}_d + \boldsymbol{v}_u\Delta t_b - \left(0,0,\tfrac12 g\,\Delta t_b^2\right),
+\label{eq:burst}
+\end{equation}
+其中投放点 $\boldsymbol{P}_d = \boldsymbol{U}_0 + \boldsymbol{v}_u t_d$，$\boldsymbol{U}_0$ 为无人机初始位置。起爆点高度满足 $\boldsymbol{P}_b^{(z)}\ge 0$（落地前起爆）。
+
+\subsubsection{云团演化方程}
+起爆时刻 $t_b=t_d+\Delta t_b$ 后，云团球心位置与有效时段为
+\begin{equation}
+\boldsymbol{C}(t) = \boldsymbol{P}_b - \left(0,0,3(t-t_b)\right), \qquad t\in[t_b,\, t_b+20].
+\label{eq:cloud}
+\end{equation}
+
+\subsubsection{遮蔽判定函数}
+给定时刻 $t$，云团球记为 $B(\boldsymbol{C}(t),R)$。目标被遮蔽当且仅当导弹到真目标圆柱上每一点 $P$ 的视线线段 $[\boldsymbol{M}(t),P]$ 均与云团球相交（体判据）。线段--球相交采用投影参数法：设线段端点 $A$、$B$、球心 $C$、半径 $R$，求球心到线段所在直线的投影参数
+\begin{equation}
+s^* = \mathrm{clip}\left(\frac{(C-A)\cdot(B-A)}{|B-A|^2},\,0,1\right),
+\label{eq:proj}
+\end{equation}
+当 $A+s^*(B-A)$ 到球心的距离不大于 $R$ 时视线被截断。该判据与角距覆盖判据等价：遮蔽成立当且仅当目标投影的最大角距 $D$ 不大于云团球的角半径 $\theta_b=\arcsin(R/|M(t)-C(t)|)$。遮蔽判据的几何示意如图 \ref{fig:criterion} 所示。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.6\textwidth]{output/figures/q1_shield.png}
+\caption{遮蔽判据几何示意（以假目标为原点的水平投影）}
+\label{fig:criterion}
+\end{figure}
+
+\subsubsection{遮蔽时长计算}
+对时间轴离散扫描，标记每个时刻的目标遮蔽状态，得到遮蔽时间区间集合；对多枚干扰弹，遮蔽时刻定义为任一有效云团球使目标整体遮蔽的时刻，遮蔽时长取各区间并集长度。数值实现上，对圆柱侧面与顶面采样，每个时刻并行判定全部采样点的视线遮蔽，计算由向量化运算完成，单次遮蔽时长评估仅需毫秒级。
+
+\subsubsection{遮蔽容差分析}
+遮蔽能否成立取决于云团球心相对导弹--目标视线轴的横向偏移。由角距判据，目标投影被云团球盘覆盖要求球心横向偏移满足 $d_{off}\le R - r_t|C-M|/|T-M|$，其中 $r_t$ 为目标半径。在导弹距目标约 17\,km、球距导弹数百米的典型构型下，容差约为 9--10\,m。这一约 10\,m 的横向容差是目标函数呈针尖形的根源，也是遮蔽判据对投放参数高度敏感的物理解释。
+
+\subsubsection{初值条件与边界条件}
+模型初值：导弹初值 $\boldsymbol{M}(0)$ 取题面给定初始位置，无人机初值取题面给定初始位置，云团在 $t=t_b$ 时刻球心位于起爆点 $\boldsymbol{P}_b$。边界条件：云团有效时段为 $[t_b,t_b+20]$\,s，超出即失效；起爆点高度满足 $0\le \boldsymbol{P}_b^{(z)}\le \boldsymbol{P}_d^{(z)}$；同一无人机两次投放间隔不小于 1\,s。上述初值与边界条件构成模型物理完备性的基础，后续各问均在此框架内扩展。

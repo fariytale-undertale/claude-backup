@@ -1,0 +1,137 @@
+\documentclass[12pt]{ctexart}
+\usepackage[a4paper,left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage[table]{xcolor}
+\usepackage[colorlinks=true, allcolors=black]{hyperref}
+\usepackage{fancyhdr}
+\renewcommand{\thesection}{\chinese{section}}
+\renewcommand{\thesubsection}{\arabic{subsection}}
+\renewcommand{\thesubsubsection}{\arabic{subsection}.\arabic{subsubsection}}
+\ctexset{
+  section/name={,、}
+}
+
+% 页眉页脚：只放论文标题与页码（避免与正文章节名重复）
+\setlength{\headheight}{14.5pt}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[C]{烟幕干扰弹投放策略的建模与优化}
+\fancyfoot[C]{\thepage}
+
+\begin{document}
+
+% ============ 摘要页（页码 1）============
+\setcounter{page}{1}
+\input{abstract.tex}
+\clearpage
+
+% ============ 正文 ============
+\section{问题重述}
+
+\subsection{问题背景}
+烟幕干扰技术通过化学燃烧或爆炸在预定空域瞬时形成烟幕云团，遮蔽来袭武器与保护目标之间的视线，是现代防空体系中成本低、效费比高的干扰手段。随着定点精确抛撒与时间引信时序控制技术的成熟，无人机可在来袭武器与保护目标之间精确布设烟幕云团。在给定无人机与导弹初始位置、运动规律及云团特性的条件下，如何设计无人机的航向、速度、投放时刻与引信延迟，使烟幕云团对保护目标的有效遮蔽时间尽可能长，是本文研究的核心。
+
+\subsection{问题重述}
+以假目标为原点建立坐标系，真目标为半径 7\,m、高 10\,m 的圆柱体，其下底面圆心为 $(0,200,0)$。三枚导弹 M1、M2、M3 以 300\,m/s 沿直线飞向假目标，五架无人机 FY1--FY5 初始位置给定，无人机可在 70--140\,m/s 内等高度匀速直线飞行，同机航向速度确定后不再调整，两次投放间隔不小于 1\,s。云团瞬时形成、半径 10\,m、以 3\,m/s 匀速下沉、起爆后 20\,s 内浓度有效。需依次解决以下五个问题：
+
+问题一：FY1 以 120\,m/s 朝向假目标飞行，受领任务 1.5\,s 后投放单枚弹、间隔 3.6\,s 起爆，求对 M1 的有效遮蔽时长。
+
+问题二：利用 FY1 投放单枚弹对 M1，确定航向、速度、投放点与起爆点，使遮蔽时间最长。
+
+问题三：利用 FY1 投放 3 枚弹对 M1，给出投放策略并保存至 result1.xlsx。
+
+问题四：利用 FY1、FY2、FY3 各投放 1 枚弹对 M1，给出投放策略并保存至 result2.xlsx。
+
+问题五：五架无人机每架至多 3 枚弹，对 M1、M2、M3 实施干扰，给出投放策略并保存至 result3.xlsx。
+
+\section{问题分析}
+
+本题属于典型的运动学、几何遮蔽与多目标优化递进问题。核心物理环节有四：导弹直线运动、干扰弹自由落体弹道、云团下沉演化与视线遮挡判定。五个问题从给定参数计算逐步推进到单弹优化、同机多弹、多机协同与多机多弹多目标，决策维度与约束复杂度逐级提升。整个求解以统一的遮蔽判据与遮蔽时长定义为基础，后问显式继承前问模型。
+
+\subsection{问题一的分析}
+问题一为确定性问题，所有运动参数均已给定，只需代入运动学方程确定云团球心轨迹，再按遮蔽判据在时间轴上扫描，求导弹到真目标的视线被云团截断的时间区间。本问核心难点在于遮蔽判据的严谨定义，需区分目标整体不可见（体判据）与目标某一特征点不可见（点判据）两种口径，并报告差异。
+
+\subsection{问题二的分析}
+问题二为单弹投放优化。决策变量为航向、速度、投放时刻与引信延迟，目标为遮蔽时长最大化。本问核心难点在于目标函数呈针尖形——云团球心必须落在导弹--目标视线轴横向约 10\,m 容差内才产生非零遮蔽，黑盒优化算法难以采样到非零区域。后文通过物理热启动生成候选点，再以局部精化加以解决。
+
+\subsection{问题三的分析}
+问题三为同机多弹投放。关键约束是同一无人机的航向速度确定后不再调整，三枚弹的球心都落在同一条无人机路径线上。需构造路径线--视线轴交点投放方案，使三枚弹遮蔽窗口在时间上错开、并集最大化，同时满足同机投放间隔不小于 1\,s。
+
+\subsection{问题四的分析}
+问题四为三机协同。三架无人机各自独立确定航向速度、各投放单枚弹覆盖不同时间窗口。先对每架机构造可达候选解池，再以三弹并集遮蔽时长最大为目标进行组合选择。难点在于不同无人机的位置差异导致其可达的遮蔽窗口时段不同，需逐机搜索可达范围。
+
+\subsection{问题五的分析}
+问题五为最复杂的情形，五架无人机至多 15 枚弹干扰三枚导弹，目标为三导弹遮蔽时长之和最大。除同机航向速度唯一、投放间隔、每机弹数等约束外，还需决定每架机采用哪条路径线、各弹分配给哪枚导弹。采用方案化贪心结合局部换方案的迭代改进算法求解，并逐一复核约束满足性。
+
+\section{模型假设}
+
+（1）假设导弹视为质点，沿直线匀速飞向假目标。题面明确飞行方向直指假目标，故弹道为指向原点的直线。
+
+（2）假设烟幕干扰弹脱离无人机后仅受重力，忽略空气阻力。题面仅给出在重力作用下运动、未给阻力参数，标准竞赛口径取自由落体。
+
+（3）假设烟幕云团瞬时形成理想球体，半径取 10\,m，球心以 3\,m/s 匀速下沉，起爆后 20\,s 内浓度满足遮蔽要求。
+
+（4）假设无人机受领任务后可瞬时调整航向，此后等高度匀速直线飞行，航向速度确定后不再调整。
+
+（5）假设重力加速度取 9.8\,m/s$^2$，不随高度变化。
+
+（6）假设遮蔽判据采用目标整体不可见（体判据），即导弹到真目标圆柱所有采样点的视线均被云团球截断才认为目标被遮蔽；点判据作为对比口径单独报告。
+
+（7）假设同一无人机两次投放的间隔不小于 1\,s。
+
+\section{符号说明}
+
+本文主要符号见表 \ref{tab:symbol}，全篇符号唯一。
+
+\begin{table}[H]
+\centering
+\caption{符号说明}
+\label{tab:symbol}
+\begin{tabular}{cll}
+\toprule
+符号 & 含义 & 单位 \\
+\midrule
+$t$ & 时间，$t=0$ 为警戒雷达发现导弹时刻 & s \\
+$\boldsymbol{M}(t)$ & 导弹在 $t$ 时刻的位置矢量 & m \\
+$v_m$ & 导弹飞行速度（300） & m/s \\
+$\boldsymbol{P}_d$ & 烟幕干扰弹投放点 & m \\
+$\boldsymbol{P}_b$ & 烟幕干扰弹起爆点 & m \\
+$t_d$ & 投放时刻 & s \\
+$\Delta t_b$ & 引信延迟，投放后起爆间隔 & s \\
+$\boldsymbol{C}(t)$ & 云团球心位置矢量 & m \\
+$R$ & 云团球半径（10） & m \\
+$T$ & 遮蔽时长 & s \\
+$\theta$ & 无人机航向，$x$ 轴正向逆时针为正 & $^\circ$ \\
+$v_u$ & 无人机飞行速度 & m/s \\
+$S$ & 真目标圆柱表面采样点集 & — \\
+$g$ & 重力加速度（9.8） & m/s$^2$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{模型的建立与求解}
+
+\input{model_common.tex}
+\input{model_q1.tex}
+\input{model_q2.tex}
+\input{model_q3.tex}
+\input{model_q4.tex}
+\input{model_q5.tex}
+
+\section{全局性模型检验}
+\input{model_global.tex}
+
+\section{模型的评价与推广}
+\input{model_eval.tex}
+
+\renewcommand{\refname}{参考文献}
+\begin{thebibliography}{99}
+\bibitem{storn1997} Storn R, Price K. Differential evolution—a simple and efficient heuristic for global optimization over continuous spaces[J]. Journal of Global Optimization, 1997, 11(4): 341-359.
+\bibitem{nelder1965} Nelder J A, Mead R. A simplex method for function minimization[J]. The Computer Journal, 1965, 7(4): 308-313.
+\bibitem{si2011} 司守奎, 孙玺菁. 数学建模算法与应用[M]. 北京: 国防工业出版社, 2011.
+\end{thebibliography}
+
+\end{document}

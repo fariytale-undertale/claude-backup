@@ -1,0 +1,104 @@
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-5b97d60492a4422ea4e9282a75ed3ba7",
+    "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-flash",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "deepseek-v4-flash",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-flash",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "deepseek-v4-flash",
+    "ANTHROPIC_MODEL": "deepseek-v4-flash"
+  },
+  "permissions": {
+    "defaultMode": "auto"
+  },
+  "model": "haiku",
+  "language": "Chinese",
+  "syntaxHighlightingDisabled": false,
+  "effortLevel": "high",
+  "askUserQuestionTimeout": "never",
+  "tui": "default",
+  "theme": "auto",
+  "verbose": false,
+  "autoCompactEnabled": true,
+  "terminalProgressBarEnabled": true,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:/Users/17186/AppData/Local/Programs/Python/Python312/python.exe\" C:/Users/17186/.claude/hooks/backup.py",
+            "timeout": 15,
+            "statusMessage": "备份到 code-backup"
+          }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:/Users/17186/AppData/Local/Programs/Python/Python312/python.exe\" C:/Users/17186/.claude/hooks/notify_hook.py",
+            "shell": "bash",
+            "timeout": 5,
+            "statusMessage": "右下角弹窗提醒"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:/Users/17186/AppData/Local/Programs/Python/Python312/python.exe\" C:/Users/17186/.claude/hooks/pycheck.py",
+            "timeout": 15,
+            "statusMessage": "Python 语法检查"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:/Users/17186/AppData/Local/Programs/Python/Python312/python.exe\" C:/Users/17186/.claude/hooks/latex-check.py",
+            "timeout": 60,
+            "statusMessage": "LaTeX 完整性检查"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:/Users/17186/AppData/Local/Programs/Python/Python312/python.exe\" C:/Users/17186/.claude/hooks/notify_hook.py",
+            "shell": "bash",
+            "timeout": 5,
+            "statusMessage": "右下角弹窗提醒"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|idle_prompt|agent_needs_input|agent_completed",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"C:/Users/17186/AppData/Local/Programs/Python/Python312/python.exe\" C:/Users/17186/.claude/hooks/notify_hook.py",
+            "shell": "bash",
+            "timeout": 5,
+            "statusMessage": "右下角弹窗提醒"
+          }
+        ]
+      }
+    ]
+  }
+}

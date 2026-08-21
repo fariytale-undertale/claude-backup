@@ -1,0 +1,107 @@
+\subsection{问题二：单弹投放优化}
+
+\subsubsection{模型选择与比较}
+问题二目标函数呈针尖形，非零区域在四维参数空间中占比极小。比较两种求解方案，结果见表 \ref{tab:q2_compare}。差分进化 \cite{storn1997} 在种群随机采样下几乎无法进入非零区域，经过 1.3 万次评估仍全部返回零值；而物理热启动结合 Nelder--Mead 精化 \cite{nelder1965}，先按球心对准视线轴的几何构造生成热启动点，再局部精化，能以更少的评估找到非零解。确定采用后者。
+
+\begin{table}[H]
+\centering
+\caption{问题二求解方案对比}
+\label{tab:q2_compare}
+\begin{tabular}{cccc}
+\toprule
+方案 & 评估次数 & 找到非零解 & 最优遮蔽时长 \\
+\midrule
+差分进化（黑盒） & $1.3\times10^4$ & 否 & 0\,s \\
+物理热启动+Nelder--Mead & $4.0\times10^3$ & 是 & 4.585\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{模型建立}
+决策变量为航向 $\theta\in[0,360^\circ)$、速度 $v_u\in[70,140]$\,m/s、投放时刻 $t_d\in[0,60]$\,s、引信延迟 $\Delta t_b\in[0,19]$\,s，均为连续变量。目标为遮蔽时长最大化：
+\begin{equation}
+\max_{\theta,v_u,t_d,\Delta t_b} T(\theta,v_u,t_d,\Delta t_b).
+\label{eq:q2obj}
+\end{equation}
+约束条件：投放点与起爆点由式 \eqref{eq:burst} 确定，起爆点高度满足 $\boldsymbol{P}_b^{(z)}\ge 0$。
+
+\subsubsection{模型求解}
+求解流程如下：STEP1 物理热启动——对全航向空间按 5$^\circ$ 步长离散，在每个航向下按球心对准导弹--目标视线轴的几何构造生成候选投放参数，并做可达性检查（起爆点高度、速度范围、投放时刻非负）；STEP2 粗筛——以粗步长评估候选遮蔽时长，取 top 15；STEP3 局部精化——以 Nelder--Mead 对四维决策变量精化，参数取最大迭代 300、坐标容差 $10^{-4}$、函数容差 $10^{-4}$；STEP4 终审——对主解、全域粗网格最优与精化 top 候选逐一以 0.005\,s 确认步长复核，取最大值。
+
+求解结果见表 \ref{tab:q2}，多热启动点精化结果见图 \ref{fig:q2_opt}，最优解遮蔽区间见图 \ref{fig:q2_iv}。
+
+\begin{table}[H]
+\centering
+\caption{问题二最优投放策略与结果}
+\label{tab:q2}
+\begin{tabular}{cccccc}
+\toprule
+航向 $\theta$ & 速度 $v_u$ & $t_d$ & $\Delta t_b$ & 遮蔽区间 & 时长 $T$ \\
+\midrule
+$5.00^\circ$ & 100\,m/s & 0.900\,s & 0.300\,s & $[1.39,5.975]$\,s & 4.585\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.7\textwidth]{output/figures/q2_optim.png}
+\caption{问题二：多热启动点精化结果（收敛到近优平台）}
+\label{fig:q2_opt}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\textwidth]{output/figures/q2_intervals.png}
+\caption{问题二：最优单弹遮蔽区间}
+\label{fig:q2_iv}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.65\textwidth]{output/figures/fig_q2_traj.png}
+\caption{问题二最优解轨迹（俯视）}
+\label{fig:q2_traj}
+\end{figure}
+
+最大有效遮蔽时长 $T=4.585$\,s。
+
+\subsubsection{结果分析}
+最优解对应迎向导弹构型：无人机朝导弹来向（$\theta\approx 5^\circ$）飞行，云团在导弹正前方极近处起爆（起爆时刻仅 1.2\,s），遮蔽窗口比问题一的 1.39\,s 显著延长。物理解释：云团位于导弹飞行路径正前方，导弹接近时其指向真目标的视线被球截断，随导弹穿越云团持续遮蔽。该构型使遮蔽窗口覆盖导弹约 1375\,m 的飞行弹道，物理上自洽。
+
+\subsubsection{结果检验与灵敏度}
+对最优解做单参数扰动，结果见表 \ref{tab:q2_sens}。投放时刻与引信延迟最为敏感：$t_d$ 偏移 +0.5\,s 使遮蔽时长降至 2.860\,s，$\Delta t_b$ 偏移 +0.5\,s 降至 2.400\,s，二者直接改变起爆点位置与云团对准视线的时机；航向与速度相对不敏感（偏移 2$^\circ$ 或 5\,m/s 时遮蔽时长仍在 4.0\,s 以上）。这表明实际投放的关键在于精确控制引信延迟与投放时刻，须严格标定。G3 全域粗网格互证：独立粗网格（10$^\circ$ 航向 $\times$ 3 速 $\times$ 投放 2.5\,s 步长 $\times$ 引信 1\,s 步长）搜索到的最优经精化后与确认值一致，峰值邻域加密无更高点。
+
+\begin{table}[H]
+\centering
+\caption{问题二最优解单参数扰动敏感度（基准 4.585\,s）}
+\label{tab:q2_sens}
+\begin{tabular}{cccc}
+\toprule
+扰动项 & 偏移量 & 遮蔽时长 & 相对基准 \\
+\midrule
+航向 $\theta$ & $-2^\circ/\,+2^\circ$ & 4.380\,s / 3.960\,s & $-0.21$\,s / $-0.63$\,s \\
+速度 $v_u$ & $-5/\,+5$\,m/s & 4.580\,s / 4.580\,s & $\approx 0$ / $\approx 0$ \\
+投放时刻 $t_d$ & $-0.5/\,+0.5$\,s & 4.340\,s / 2.860\,s & $-0.25$\,s / $-1.73$\,s \\
+引信延迟 $\Delta t_b$ & $-0.5/\,+0.5$\,s & 0\,s / 2.400\,s & $-4.59$\,s / $-2.19$\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+对起爆延迟下界的敏感性，在 $\Delta t_b\ge lb$ 约束下重优化（而非固定其他变量），结果见表 \ref{tab:q2_g0}。可见下界从 0 抬升至 1.0\,s 时，重优化遮蔽时长稳定在 4.53--4.59\,s（波动约 1\%），说明若实际引信下限更大，无人机可重新规划参数补偿，结论不脆弱；而单参数扰动表反映的则是固定方案下对引信精度的实施要求，两者语义不同，均如实报告。
+
+\begin{table}[H]
+\centering
+\caption{起爆延迟下界敏感性（约束下重优化）}
+\label{tab:q2_g0}
+\begin{tabular}{cccc}
+\toprule
+下界 $lb$ & 重优化时长 & 最优航向 & 最优 $v_u$ \\
+\midrule
+0.0\,s & 4.570\,s & $5.2^\circ$ & 90\,m/s \\
+0.2\,s & 4.585\,s & $5.0^\circ$ & 101\,m/s \\
+0.5\,s & 4.580\,s & $4.9^\circ$ & 75\,m/s \\
+1.0\,s & 4.530\,s & $6.5^\circ$ & 73\,m/s \\
+\bottomrule
+\end{tabular}
+\end{table}

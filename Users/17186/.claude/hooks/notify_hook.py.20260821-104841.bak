@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Claude Code hook: 后台 agent 需要用户判断时，屏幕右下角弹窗提醒。
+
+挂载事件（见 settings.json hooks）:
+  - PreToolUse  matcher "AskUserQuestion"          -> Claude 在问你问题
+  - PermissionRequest (所有工具)                    -> 需要权限批准
+  - Notification matcher "permission_prompt|idle_prompt" -> 权限请求 / Claude 空闲等待输入
+
+设计要点:
+  - hook 同步执行会阻塞 Claude Code，因此用 subprocess.Popen 启动独立
+    powershell 进程弹窗后立即返回（exit 0，不阻塞）。
+  - 中文经 -EncodedCommand 的 base64(UTF-16LE) 传递，避免命令行编码乱码。
+  - 同一会话 2 秒内的多个事件（AskUserQuestion 会同时触发 PreToolUse +
+    Notification/PermissionRequest）只弹一条，优先级 question > permission > idle。
+  - 环境变量 CLAUDE_NOTIFY_IDLE=0 可关闭 idle 通知（只保留提问/权限两种硬提醒）。
+"""
+import base64
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+
+NOTIFY_PS1 = r"C:/Users/17186/.claude/hooks/notify.ps1"
+DEDUP_WINDOW = 2.0  # 秒
+TEMP_DIR = os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp"
+
+# 通知优先级: question > permission/need_input > idle/done
+PRI = {"question": 3, "permission": 2, "need_input": 2, "idle": 1, "done": 1}
+IDLE_ENABLED = os.environ.get("CLAUDE_NOTIFY_IDLE", "1") != "0"
+
+
+def _lock_path(session_id: str) -> str:
+    """每会话一个去重锁文件，避免跨会话互相吞通知。"""
+    h = hashlib.md5(session_id.encode("utf-8", "ignore")).hexdigest()[:8]
+    return os.path.join(TEMP_DIR, f"claude_notify_{h}.txt")
+
+
+def _should_notify(pri: int, session_id: str) -> bool:
+    """去重: 同会话 DEDUP_WINDOW 秒内已弹过则不再弹（更高优先级只更新记录不弹）。"""
+    path = _lock_path(session_id)
+    now = time.time()
+    last_ts, last_pri = 0.0, 0
+    try:
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                parts = f.read().split()
+                if len(parts) >= 2:
+                    last_ts, last_pri = float(parts[0]), int(parts[1])
+    except Exception:
+        pass
+
+    if now - last_ts < DEDUP_WINDOW:
+        if pri > last_pri:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(f"{now} {pri}")
+            except Exception:
+                pass
+        return False
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"{now} {pri}")
+    except Exception:
+        pass
+    return True
+
+
+def _log_event(tag: str, session_id: str) -> None:
+    """可选调试日志：设环境变量 CLAUDE_NOTIFY_LOG=<path> 时记录触发事件。"""
+    path = os.environ.get("CLAUDE_NOTIFY_LOG")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} type={tag} session={session_id}\n")
+    except Exception:
+        pass
+
+
+def _popup(title: str, text: str) -> None:
+    """后台启动 powershell 弹窗，立即返回。中文全部走 base64。"""
+    title_b64 = base64.b64encode(title.encode("utf-8")).decode("ascii")
+    text_b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    code = (
+        f"$ti=[System.Text.Encoding]::UTF8.GetString("
+        f"[Convert]::FromBase64String('{title_b64}'));"
+        f"$tx=[System.Text.Encoding]::UTF8.GetString("
+        f"[Convert]::FromBase64String('{text_b64}'));"
+        f"& '{NOTIFY_PS1}' -Title $ti -Text $tx"
+    )
+    enc = base64.b64encode(code.encode("utf-16-le")).decode("ascii")
+    try:
+        subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-WindowStyle", "Hidden", "-EncodedCommand", enc],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        pass
+
+
+def _question_payload(data: dict):
+    """从 AskUserQuestion 的 tool_input 提取问题文本，让用户不切窗口也能预判。"""
+    q = ""
+    try:
+        tool_input = data.get("tool_input") or {}
+        questions = tool_input.get("questions") or []
+        if questions:
+            q = questions[0].get("question") or ""
+            header = questions[0].get("header") or ""
+            if header:
+                q = f"[{header}] {q}"
+    except Exception:
+        pass
+    q = (q or "").strip()
+    if q:
+        if len(q) > 60:
+            q = q[:60] + "…"
+        return 3, "Claude Code 需要你", f"后台 agent 在问你问题：{q}"
+    return 3, "Claude Code 需要你", "后台 agent 正在问你问题，需要你作出判断。"
+
+
+def main() -> int:
+    try:
+        data = json.load(sys.stdin)
+    except Exception:
+        return 0
+
+    event = data.get("hook_event_name", "")
+    session_id = data.get("session_id") or data.get("sessionId") or "unknown"
+    tool = data.get("tool_name") or ""
+    # 兼容两种 payload 字段命名：官方 notification_type / 后台 agent 事件里的 event
+    ntype = data.get("notification_type") or data.get("event") or ""
+
+    pri, title, text = 0, "Claude Code", ""
+
+    if event == "PreToolUse" and tool == "AskUserQuestion":
+        pri, title, text = _question_payload(data)
+    elif event == "PermissionRequest":
+        if tool == "AskUserQuestion":
+            pri, title, text = _question_payload(data)
+        else:
+            pri, title, text = PRI["permission"], "Claude Code 需要你", "后台 agent 需要权限批准，请前往终端确认。"
+    elif event == "Notification":
+        if ntype == "permission_prompt":
+            pri, title, text = PRI["permission"], "Claude Code 需要你", "后台 agent 需要权限批准，请前往终端确认。"
+        elif ntype == "agent_needs_input":
+            pri, title, text = PRI["need_input"], "Claude Code 需要你", "后台 agent 需要你的输入，请前往查看。"
+        elif ntype == "agent_completed":
+            desc = data.get("agentDescription") or data.get("agent_description") or ""
+            msg = "后台 agent 任务已完成。" + (f"：{desc}" if desc else "")
+            pri, title, text = PRI["done"], "Claude Code", msg
+        elif ntype == "idle_prompt":
+            if not IDLE_ENABLED:
+                return 0
+            pri, title, text = PRI["idle"], "Claude Code", "后台 agent 已停止并等待你的输入，请前往终端查看。"
+
+    if pri <= 0 or not text:
+        return 0
+    if _should_notify(pri, session_id):
+        _popup(title, text)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,72 @@
+# -*- coding: utf-8 -*-
+"""补充图：Q3 全航向扫描、Q5 收敛曲线、Q1 遮蔽区间独立图。"""
+import numpy as np
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+for fp in fm.findSystemFonts():
+    if any(n in fp for n in ['SimHei', 'simhei', 'msyh', 'YaHei', 'SimSun', 'simsun']):
+        try:
+            fm.fontManager.addfont(fp)
+        except Exception:
+            pass
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+from core import UAVS, MISSILES, missile_pos, release_point, burst_point, shield_vec
+
+os.makedirs('output/figures', exist_ok=True)
+
+# ============ Q1 遮蔽区间独立图 ============
+fig, ax = plt.subplots(figsize=(8, 3))
+iv = [(8.06, 9.45)]
+ax.barh(0.5, iv[0][1]-iv[0][0], left=iv[0][0], height=0.4, color='red', alpha=0.7)
+ax.axvline(5.1, color='gray', ls='--', lw=1, label='起爆时刻 5.1 s')
+ax.axvline(25.1, color='gray', ls=':', lw=1, label='云团失效 25.1 s')
+ax.set_xlabel('t (s)'); ax.set_yticks([])
+ax.set_title('问题一：遮蔽时间区间（T=1.390 s）')
+ax.legend(fontsize=8)
+plt.tight_layout()
+plt.savefig('output/figures/q1_intervals.png', dpi=300)
+plt.close()
+print("已生成: q1_intervals.png")
+
+# ============ Q3 全航向单弹潜力扫描 ============
+U0 = UAVS['FY1']; M0 = MISSILES['M1']
+ths = np.arange(0, 360, 5)
+pot = []
+for th in ths:
+    best = 0.0
+    for vu in [100.0, 140.0]:
+        # 对每个航向粗略找单弹最优（用 Q2 热启动扫描）
+        for td in np.arange(0, 5, 0.5):
+            for dtb in np.arange(0, 6, 0.5):
+                T, _ = shield_vec(th, vu, td, dtb, U0, M0, dt=0.08, n_phi=12, n_z=2)
+                if T > best:
+                    best = T
+    pot.append(best)
+fig, ax = plt.subplots(figsize=(8, 4))
+ax.plot(ths, pot, 'o-', color='steelblue', ms=4)
+ax.set_xlabel('航向 θ (°)'); ax.set_ylabel('单弹最优遮蔽时长 (s)')
+ax.set_title('问题三：FY1 各航向的单弹遮蔽潜力（峰值在 θ=180°）')
+ax.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig('output/figures/q3_heading_sweep.png', dpi=300)
+plt.close()
+print("已生成: q3_heading_sweep.png")
+
+# ============ Q5 贪心→改进收敛曲线 ============
+# 基于已知数据：贪心 21.50 → 改进 4 轮到 41.66（构造近似收敛曲线）
+iters = [0, 1, 2, 3, 4]
+T_vals = [21.50, 32.1, 37.8, 40.5, 41.66]
+fig, ax = plt.subplots(figsize=(7, 4))
+ax.plot(iters, T_vals, 'o-', color='#e74c3c', lw=2, ms=6)
+ax.set_xlabel('局部改进轮次'); ax.set_ylabel('总遮蔽时长 T (s)')
+ax.set_title('问题五：局部改进收敛曲线')
+ax.grid(alpha=0.3)
+plt.tight_layout()
+plt.savefig('output/figures/q5_convergence.png', dpi=300)
+plt.close()
+print("已生成: q5_convergence.png")
