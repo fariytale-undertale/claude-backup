@@ -1,0 +1,5 @@
+# Memory Index
+
+- [pre-edit-backup](pre-edit-backup.md) — 改代码前先备份原文件到 D:\code-backup\ 并推送 git
+- [criterion-gate-multi-compare](criterion-gate-multi-compare.md) — 判据闸门遇抽象层选择默认多方案并行对比而非单选
+- [upper-bound-probe](upper-bound-probe.md) — 优化题标配「低成本上限探查」，跨题共享子解互证，间隙大即触发重优化

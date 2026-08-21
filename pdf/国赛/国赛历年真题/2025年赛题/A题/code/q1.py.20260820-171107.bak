@@ -1,0 +1,180 @@
+# -*- coding: utf-8 -*-
+"""
+问题一：FY1 以 120 m/s 朝向假目标方向飞行，受领任务 1.5 s 后投放 1 枚烟幕干扰弹，
+间隔 3.6 s 后起爆，求烟幕干扰弹对 M1 的有效遮蔽时长。
+给定参数，确定性求解。含：锚点手算、体/点判据对比、区分性测试、采样收敛性、半径敏感性。
+"""
+import time
+import numpy as np
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+for fp in fm.findSystemFonts():
+    if any(n in fp for n in ['SimHei', 'simhei', 'msyh', 'YaHei', 'SimSun', 'simsun']):
+        try:
+            fm.fontManager.addfont(fp)
+        except Exception:
+            pass
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+
+from core import (G, R_CLOUD, MISSILES, UAVS, missile_pos, missile_hit_time,
+                  release_point, burst_point, cloud_center, target_sample_points,
+                  shield_intervals_single, intervals_length)
+
+t0all = time.time()
+
+# ---- 问题一给定参数 ----
+U0 = UAVS['FY1']
+M0 = MISSILES['M1']
+THETA = 180.0      # 朝向假目标方向（x 负向）
+VU = 120.0
+TD = 1.5
+DTTB = 3.6
+TB = TD + DTTB     # 起爆时刻 5.1 s
+DT = 0.005         # 确认步长
+
+print("=" * 70)
+print("问题一：给定参数下的遮蔽时长")
+print("=" * 70)
+
+# ---- 锚点手算验证（G4：方向向量符号手验）----
+Pd = release_point(U0, THETA, VU, TD)
+Pb = burst_point(Pd, THETA, VU, DTTB)
+print("\n[锚点手算]")
+print(f"投放点 Pd = {np.round(Pd,3)}  (期望 (17620, 0, 1800))")
+print(f"起爆点 Pb = {np.round(Pb,3)}  (期望 (17188, 0, 1736.5))")
+print(f"起爆时刻 tb = {TB} s")
+assert np.allclose(Pd, [17620, 0, 1800], atol=1e-6), "投放点锚点失败"
+assert np.allclose(Pb, [17188, 0, 1736.496], atol=1e-3), "起爆点锚点失败"
+print("锚点校验通过 ✓")
+
+# 下沉量手算
+sink = 0.5 * G * DTTB**2
+print(f"下沉量 0.5*g*3.6^2 = {sink:.3f} m")
+assert abs(sink - 63.504) < 1e-3
+
+# ---- 遮蔽时长（体判据，主结果）----
+t1s = time.time()
+intervals_body = shield_intervals_single(THETA, VU, TD, DTTB, U0, M0,
+                                         dt=DT, n_phi=48, n_z=4, criterion='body')
+T_body = intervals_length(intervals_body)
+print(f"\n[体判据] 遮蔽区间: {[tuple(round(x,3) for x in iv) for iv in intervals_body]}")
+print(f"有效遮蔽时长 T_body = {T_body:.4f} s")
+print(f"  用时 {time.time()-t1s:.2f} s")
+
+# ---- 遮蔽时长（点判据，对比口径：真目标中心点 (0,200,5)）----
+ref_point = np.array([0.0, 200.0, 5.0])
+intervals_point = shield_intervals_single(THETA, VU, TD, DTTB, U0, M0,
+                                          dt=DT, n_phi=48, n_z=4, criterion='point',
+                                          ref_point=ref_point)
+T_point = intervals_length(intervals_point)
+print(f"\n[点判据] 遮蔽区间: {[tuple(round(x,3) for x in iv) for iv in intervals_point]}")
+print(f"有效遮蔽时长 T_point = {T_point:.4f} s")
+print(f"点/体差异 = {(T_point-T_body)/T_body*100:.2f}%")
+
+# ---- 区分性测试：构造跨判据极端案例 ----
+# 构造：导弹 M 在目标正前方远处，球心位于导弹-中心点视线轴上但很小（R=3），
+# 球只挡中心点视线、挡不住圆柱边缘点 → 点判据 True、体判据 False，断言物理正确者（体判据）。
+print("\n[区分性测试：点判据 vs 体判据]")
+M_test = np.array([0.0, 500.0, 5.0])
+C_test = np.array([0.0, 350.0, 5.0])   # 在视线轴上（目标中心与导弹之间）
+R_test = 3.0                           # 小球：目标角半径 asin(3/150)≈1.1° < 目标半张角 atan(7/300)≈1.3°
+S_test = target_sample_points(n_phi=12, n_z=2)   # 稀疏采样含侧面+顶面
+from core import seg_sphere_hit, is_blocked
+# 中心点视线被挡
+cen_blocked = seg_sphere_hit(M_test, ref_point, C_test, R_test)
+# 圆柱边缘点 (7,200,5) 视线不应被挡（球心到该视线投影距离>R）
+edge_blocked = seg_sphere_hit(M_test, np.array([RT, 200.0, 5.0]), C_test, R_test)
+# 体判据（所有采样点全被挡才成立）
+body_blocked = is_blocked(M_test, S_test, C_test, R_test)
+print(f"点判据(中心点视线被挡) = {cen_blocked}")
+print(f"边缘点视线被挡 = {edge_blocked}")
+print(f"体判据(目标整体不可见) = {body_blocked}")
+# 物理正确者：球只挡中心点、边缘仍可见 → 导弹仍能发现目标 → 体判据=False 正确（点判据高估）
+assert cen_blocked is True, "点判据应成立（中心点被挡）"
+assert edge_blocked is False, "边缘点不应被挡"
+assert body_blocked is False, "体判据不应成立（边缘仍可见）"
+print("区分性测试通过：点判据=True、体判据=False，断言物理正确者(体判据) ✓")
+
+# ---- 采样收敛性 ----
+print("\n[采样收敛性] 周向 n_phi 档")
+for np_ in [24, 48, 96, 144]:
+    iv = shield_intervals_single(THETA, VU, TD, DTTB, U0, M0,
+                                 dt=DT, n_phi=np_, n_z=4, criterion='body')
+    print(f"  n_phi={np_}: T = {intervals_length(iv):.4f} s")
+# 高度层 n_z 档
+print("[高度层 n_z 档]")
+for nz in [3, 4, 6, 8]:
+    iv = shield_intervals_single(THETA, VU, TD, DTTB, U0, M0,
+                                 dt=DT, n_phi=48, n_z=nz, criterion='body')
+    print(f"  n_z={nz}: T = {intervals_length(iv):.4f} s")
+
+# ---- 半径敏感性（P1 口径关键性）----
+print("\n[云团半径敏感性]")
+for Rtest in [5.0, 8.0, 10.0, 12.0]:
+    iv = shield_intervals_single(THETA, VU, TD, DTTB, U0, M0,
+                                 dt=DT, n_phi=48, n_z=4, criterion='body', R=Rtest)
+    print(f"  R={Rtest}: T = {intervals_length(iv):.4f} s")
+
+# ---- 起爆延迟下界敏感性（G0：P3=0 时结论是否稳健）----
+print("\n[起爆延迟下界敏感性——检查 P3=0 语义]")
+for dmin in [0.0, 0.2, 0.5, 1.0]:
+    iv = shield_intervals_single(THETA, VU, TD, dmin, U0, M0,
+                                 dt=DT, n_phi=48, n_z=4, criterion='body')
+    print(f"  dttb={dmin}: T = {intervals_length(iv):.4f} s (仅作语义演示，Q1 固定 3.6)")
+
+# ---- 图：M1 位置与遮蔽区间 ----
+t_arr = np.arange(0, missile_hit_time(M0) + 0.1, 0.1)
+M_arr = np.array([missile_pos(M0, t) for t in t_arr])
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+# 左：M1 水平轨迹 + 遮蔽段
+ax = axes[0]
+ax.plot(M_arr[:, 0], M_arr[:, 1], 'b-', lw=1.5, label='M1 水平轨迹')
+ax.plot(0, 0, 'ks', ms=8, label='假目标')
+ax.plot(TARGET_AXIS[0], TARGET_AXIS[1], 'r^', ms=10, label='真目标')
+# 遮蔽段轨迹加粗
+for iv in intervals_body:
+    seg = t_arr[(t_arr >= iv[0]) & (t_arr <= iv[1])]
+    if len(seg):
+        Mp = np.array([missile_pos(M0, s) for s in seg])
+        ax.plot(Mp[:, 0], Mp[:, 1], 'r-', lw=4, label='遮蔽段' if iv is intervals_body[0] else None)
+ax.scatter([U0[0]], [U0[1]], c='g', marker='o', label='FY1 初始')
+ax.scatter([Pd[0]], [Pd[1]], c='orange', marker='s', label='投放点')
+ax.scatter([Pb[0]], [Pb[1]], c='purple', marker='*', s=120, label='起爆点')
+ax.set_xlabel('x (m)'); ax.set_ylabel('y (m)')
+ax.set_title('M1 水平轨迹与遮蔽段'); ax.legend(fontsize=8); ax.axis('equal')
+ax.set_box_aspect(1)
+# 右：遮蔽时间区间
+ax = axes[1]
+for iv in intervals_body:
+    ax.barh(0.5, iv[1]-iv[0], left=iv[0], height=0.4, color='red', alpha=0.7)
+ax.axvline(TB, color='gray', ls='--', lw=1, label='起爆时刻')
+ax.axvline(TB+20, color='gray', ls=':', lw=1, label='云团失效')
+ax.set_xlabel('t (s)'); ax.set_yticks([])
+ax.set_title(f'遮蔽时间区间（体判据，T={T_body:.3f} s）')
+ax.legend(fontsize=8)
+plt.tight_layout()
+os.makedirs('output/figures', exist_ok=True)
+plt.savefig('output/figures/q1_shield.png', dpi=300)
+print("\n图已保存: output/figures/q1_shield.png")
+
+print(f"\n总用时 {time.time()-t0all:.2f} s")
+
+# ---- 结果表 ----
+import json
+result = {
+    'theta': THETA, 'vu': VU, 'td': TD, 'dttb': DTTB, 'tb': TB,
+    '投放点': Pd.tolist(), '起爆点': Pb.tolist(),
+    '遮蔽区间_body': [tuple(round(x,4) for x in iv) for iv in intervals_body],
+    'T_body': round(T_body, 4),
+    '遮蔽区间_point': [tuple(round(x,4) for x in iv) for iv in intervals_point],
+    'T_point': round(T_point, 4),
+}
+os.makedirs('output/tables', exist_ok=True)
+with open('output/tables/q1_result.json', 'w', encoding='utf-8') as f:
+    json.dump(result, f, ensure_ascii=False, indent=2)
+print("结果已保存: output/tables/q1_result.json")

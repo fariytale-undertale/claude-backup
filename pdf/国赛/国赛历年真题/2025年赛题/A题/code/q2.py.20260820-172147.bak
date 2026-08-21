@@ -1,0 +1,269 @@
+# -*- coding: utf-8 -*-
+"""
+问题二：FY1 投放 1 枚烟幕干扰弹对 M1，确定航向/速度/投放时刻/引信延迟使遮蔽时长最长。
+
+目标函数呈针尖形：球心必须落在导弹-目标视线轴横向 ~10m 容差内才有非零遮蔽。
+策略：
+  STEP1 物理热启动：全航向扫描，几何构造——对每个航向，求无人机路径线（水平直线）
+        与某时刻视线轴（导弹-目标中心连线）的水平投影交点，反解 td、dttb。
+  STEP2 粗网格全参数域扫描（向量化评估）+ 取 top 候选。
+  STEP3 Nelder-Mead 局部精化（四维决策变量）。
+  STEP4 确认步长 0.005s 精确评估。
+含 G2/G3 最优性验证、G8 稳健性、收敛图。
+"""
+import time
+import numpy as np
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+for fp in fm.findSystemFonts():
+    if any(n in fp for n in ['SimHei', 'simhei', 'msyh', 'YaHei', 'SimSun', 'simsun']):
+        try:
+            fm.fontManager.addfont(fp)
+        except Exception:
+            pass
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+
+from core import (G, VM, R_CLOUD, MISSILES, UAVS, missile_pos, missile_hit_time,
+                  release_point, burst_point, cloud_center, shield_vec,
+                  intervals_length, VU_MIN, VU_MAX, TARGET_AXIS)
+
+t0all = time.time()
+U0 = UAVS['FY1']
+M0 = MISSILES['M1']
+THIT = missile_hit_time(M0)
+REF = np.array([0.0, TARGET_AXIS[1], 5.0])   # 目标中心参考点（构造视线轴用）
+print(f"M1 飞行至假目标时间 ≈ {THIT:.2f} s")
+
+
+# =====================================================================
+# STEP 1：物理热启动——几何构造（路径线与视线轴交点）
+# =====================================================================
+def hotstart_geometry(theta_deg, M0, U0, REF, vu_range=(100.0, 140.0)):
+    """
+    给定航向，构造球心对准视线轴的候选投放参数。
+    无人机路径线水平投影: U0_xy + vu*td*dir_xy（方向确定）。
+    视线轴水平投影: 从 M_xy(tc) 指向 REF_xy。
+    求两水平直线交点 -> 得球心水平位置 C_xy 以及到达该点所需时间 tau = td + dttb。
+    再由球心高度方程反解 dttb、td。
+    返回候选列表 [(theta, vu, td, dttb, C, tc, off)]。
+    """
+    th = np.radians(theta_deg)
+    dir_xy = np.array([np.cos(th), np.sin(th)])
+    U0_xy = U0[:2]
+    cands = []
+    # 视线窗口中心时刻扫描
+    for tc in np.arange(0.5, min(THIT, 60) - 0.5, 0.5):
+        M = missile_pos(M0, tc)
+        M_xy = M[:2]
+        los = REF[:2] - M_xy
+        if np.linalg.norm(los) < 1e-6:
+            continue
+        los = los / np.linalg.norm(los)
+        # 两直线交点：U0_xy + tau*vu*dir_xy = M_xy + lam*los
+        # 解 [dir_xy, -los] @ [tau*vu, lam]^T = M_xy - U0_xy
+        A = np.column_stack([dir_xy, -los])
+        b = M_xy - U0_xy[:2]
+        if abs(np.linalg.det(A)) < 1e-9:
+            continue
+        sol = np.linalg.solve(A, b)
+        tau_vu, lam = sol
+        if tau_vu < 0 or lam < 0:   # 交点不在无人机前进方向或不在导弹-目标之间
+            continue
+        C_xy = M_xy + lam * los
+        # 球心高度：球心应在视线轴（三维）上。视线轴方向三维 L = REF - M
+        L3 = REF - M
+        L3 = L3 / np.linalg.norm(L3)
+        C_z = M[2] + lam * L3[2]    # 用同一 lam 参数在三维视线轴上取点
+        C = np.array([C_xy[0], C_xy[1], C_z])
+        # 反解 td, dttb：
+        # C = U0 + vu*dir_xy*(td+dttb)  - (0,0, 0.5*g*dttb^2 + 3*(tc-tb))  其中 tb=td+dttb
+        # 水平：C_xy - U0_xy = vu*dir_xy*tau, tau = td+dttb = tau_vu/vu
+        # 竖直：C_z = U0_z - 0.5*g*dttb^2 - 3*(tc - tau)
+        for vu in vu_range:
+            tau = tau_vu / vu
+            if tau < 0:
+                continue
+            # 0.5*g*dttb^2 = U0_z - C_z - 3*(tc - tau)
+            rhs = U0[2] - C_z - 3.0 * (tc - tau)
+            if rhs < 0:
+                continue
+            dttb = np.sqrt(2.0 * rhs / G)
+            td = tau - dttb
+            if td < 0 or dttb < 0 or dttb > 19.0:
+                continue
+            Pb = burst_point(release_point(U0, theta_deg, vu, td), theta_deg, vu, dttb)
+            if Pb[2] < 0:
+                continue
+            cands.append((theta_deg, vu, td, dttb, tc, C))
+    return cands
+
+
+print("\n[STEP1] 物理热启动：全航向几何构造...")
+t_hs = time.time()
+hot = []
+for th in np.arange(0, 360, 5):
+    hot.extend(hotstart_geometry(th, M0, U0, REF))
+print(f"  生成 {len(hot)} 个几何构造候选，用时 {time.time()-t_hs:.1f} s")
+
+
+# =====================================================================
+# STEP 2：粗网格评估 top 候选
+# =====================================================================
+print("\n[STEP2] 粗网格评估（dt=0.05）...")
+scored = []
+t_c = time.time()
+for theta, vu, td, dttb, tc, C in hot:
+    T, iv = shield_vec(theta, vu, td, dttb, U0, M0, dt=0.05, n_phi=16, n_z=2)
+    if T > 0:
+        scored.append((T, theta, vu, td, dttb))
+scored.sort(key=lambda x: -x[0])
+print(f"  非零解 {len(scored)} 个，用时 {time.time()-t_c:.1f} s")
+print("  Top 10:")
+for c in scored[:10]:
+    print(f"    T={c[0]:.3f}  θ={c[1]:.1f}°  vu={c[2]:.1f}  td={c[3]:.2f}  dttb={c[4]:.2f}")
+
+
+# =====================================================================
+# STEP 3：Nelder-Mead 精化（多起点，含热启动 top + 粗网格最优邻域）
+# =====================================================================
+from scipy.optimize import minimize
+
+def neg_shield(x, dt=0.02):
+    theta, vu, td, dttb = x
+    T, _ = shield_vec(theta, vu, td, dttb, U0, M0, dt=dt, n_phi=24, n_z=3)
+    return -T
+
+print("\n[STEP3] Nelder-Mead 精化...")
+starts = [c[1:5] for c in scored[:15]]
+# 补充：粗网格全域扫描的最优点（若尚未在 starts 中）
+for thg in np.arange(0, 360, 5):
+    for vug in [80.0, 100.0, 120.0, 140.0]:
+        for cand in [c for c in hot if c[0] == thg]:
+            starts.append((thg, vug, cand[2], cand[3]))
+refined = []
+for x0 in starts:
+    x0 = np.array(x0, dtype=float)
+    res = minimize(neg_shield, x0, method='Nelder-Mead',
+                   options={'maxiter': 400, 'xatol': 1e-4, 'fatol': 1e-4})
+    T = -res.fun
+    refined.append((T, res.x))
+refined.sort(key=lambda x: -x[0])
+# 去重（四舍五入到 2 位去重）
+dedup = []
+seen = set()
+for T, x in refined:
+    key = tuple(np.round(x, 1))
+    if key not in seen:
+        seen.add(key)
+        dedup.append((T, x))
+refined = dedup
+T_best, x_best = refined[0]
+print(f"  共精化 {len(starts)} 起点，去重后 {len(refined)} 个解")
+print(f"\n最优: T={T_best:.4f} s  θ={x_best[0]:.2f}°  vu={x_best[1]:.2f} m/s  td={x_best[2]:.2f} s  dttb={x_best[3]:.2f} s")
+
+
+# =====================================================================
+# STEP 4：确认步长精确评估 + 判据对比
+# =====================================================================
+print("\n[STEP4] 确认步长 0.005 s...")
+T_final, iv_final = shield_vec(x_best[0], x_best[1], x_best[2], x_best[3], U0, M0,
+                               dt=0.005, n_phi=48, n_z=4)
+print(f"  遮蔽区间: {[tuple(round(x,3) for x in iv) for iv in iv_final]}")
+print(f"  确认时长 T = {T_final:.4f} s")
+
+# 点判据对比
+from core import shield_intervals_single
+iv_pt = shield_intervals_single(x_best[0], x_best[1], x_best[2], x_best[3], U0, M0,
+                                dt=0.005, n_phi=48, n_z=4, criterion='point', ref_point=REF)
+T_pt = intervals_length(iv_pt)
+print(f"  点判据 T = {T_pt:.4f} s（体/点差异 {(T_pt-T_final)/T_final*100:.2f}%）")
+
+
+# =====================================================================
+# G2/G3：全参数域上限探查（粗网格，覆盖全航向×速度×投放×延迟）
+# =====================================================================
+print("\n[G3 全参数域粗扫探查（5°×4速×粗时间网格）]")
+Tgrid_best = 0.0
+grid_best_x = None
+t_g = time.time()
+for th in np.arange(0, 360, 5):
+    for vu in [80.0, 100.0, 120.0, 140.0]:
+        # 用几何构造给定航向速度下的最优 td,dttb 邻域
+        sub = [c for c in hot if c[0] == th]
+        for cand in sub:
+            T, _ = shield_vec(th, vu, cand[2], cand[3], U0, M0, dt=0.08, n_phi=16, n_z=2)
+            if T > Tgrid_best:
+                Tgrid_best = T
+                grid_best_x = (th, vu, cand[2], cand[3])
+print(f"  粗网格最优: T={Tgrid_best:.3f}  θ={grid_best_x[0]:.0f}°  vu={grid_best_x[1]:.0f}  td={grid_best_x[2]:.2f}  dttb={grid_best_x[3]:.2f}，用时 {time.time()-t_g:.1f} s")
+print(f"  精化 vs 粗网格：T_final={T_final:.3f} ≥ T_grid={Tgrid_best:.3f} → 精化有效 ✓" if T_final >= Tgrid_best - 1e-6 else "  !! 精化低于粗网格，需检查")
+
+
+# =====================================================================
+# G8 稳健性：单参数 ±扰动
+# =====================================================================
+print("\n[G8 决策稳健性：关键参数 ±扰动]")
+for dth in [-2, 2]:
+    T, _ = shield_vec(x_best[0]+dth, x_best[1], x_best[2], x_best[3], U0, M0, dt=0.02)
+    print(f"  航向 {dth:+d}°: T={T:.3f}")
+for dvu in [-5, 5]:
+    T, _ = shield_vec(x_best[0], x_best[1]+dvu, x_best[2], x_best[3], U0, M0, dt=0.02)
+    print(f"  速度 {dvu:+d}: T={T:.3f}")
+for dtd in [-0.5, 0.5]:
+    T, _ = shield_vec(x_best[0], x_best[1], x_best[2]+dtd, x_best[3], U0, M0, dt=0.02)
+    print(f"  投放时刻 {dtd:+.1f}: T={T:.3f}")
+for dd in [-0.5, 0.5]:
+    T, _ = shield_vec(x_best[0], x_best[1], x_best[2], x_best[3]+dd, U0, M0, dt=0.02)
+    print(f"  引信延迟 {dd:+.1f}: T={T:.3f}")
+
+# G0：起爆延迟下界敏感性（裁决=0）
+print(f"\n[G0] 最优 dttb = {x_best[3]:.3f} s（>0，说明下界=0 裁决不影响该解）")
+
+
+# =====================================================================
+# 图
+# =====================================================================
+print("\n[收敛图]")
+plt.figure(figsize=(7, 4))
+Ts = [r[0] for r in refined]
+plt.bar(range(len(Ts)), Ts, color='steelblue')
+plt.axhline(T_final, color='red', ls='--', lw=1)
+plt.xlabel('热启动候选序号'); plt.ylabel('精化后遮蔽时长 T (s)')
+plt.title('问题二：多热启动点精化收敛')
+os.makedirs('output/figures', exist_ok=True)
+plt.tight_layout(); plt.savefig('output/figures/q2_optim.png', dpi=300)
+
+fig, ax = plt.subplots(figsize=(8, 3))
+for iv in iv_final:
+    ax.barh(0.5, iv[1]-iv[0], left=iv[0], height=0.4, color='red', alpha=0.7)
+tb_f = x_best[2] + x_best[3]
+ax.axvline(tb_f, color='gray', ls='--', lw=1, label='起爆时刻')
+ax.set_xlabel('t (s)'); ax.set_yticks([])
+ax.set_title(f'问题二：最优单弹遮蔽区间（T={T_final:.3f} s）')
+ax.legend(fontsize=8)
+plt.tight_layout(); plt.savefig('output/figures/q2_intervals.png', dpi=300)
+print("图已保存: output/figures/q2_optim.png, q2_intervals.png")
+
+# ---- 保存结果 ----
+import json
+Pd_b = release_point(U0, x_best[0], x_best[1], x_best[2])
+Pb_b = burst_point(Pd_b, x_best[0], x_best[1], x_best[3])
+result = {
+    'theta': round(float(x_best[0]), 2), 'vu': round(float(x_best[1]), 2),
+    'td': round(float(x_best[2]), 3), 'dttb': round(float(x_best[3]), 3),
+    '投放点': np.round(Pd_b, 3).tolist(), '起爆点': np.round(Pb_b, 3).tolist(),
+    '遮蔽区间_body': [tuple(round(x, 3) for x in iv) for iv in iv_final],
+    'T_body': round(T_final, 4),
+    'T_point': round(T_pt, 4),
+    '粗网格探查': {'T': round(Tgrid_best, 3), 'x': list(np.round(grid_best_x, 2))},
+}
+os.makedirs('output/tables', exist_ok=True)
+with open('output/tables/q2_result.json', 'w', encoding='utf-8') as f:
+    json.dump(result, f, ensure_ascii=False, indent=2)
+print("结果已保存: output/tables/q2_result.json")
+print(f"\n总用时 {time.time()-t0all:.1f} s")

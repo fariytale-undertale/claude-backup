@@ -1,0 +1,221 @@
+# -*- coding: utf-8 -*-
+"""
+问题四：利用 FY1、FY2、FY3 三架无人机各投放 1 枚烟幕干扰弹对 M1 实施干扰。
+
+继承问题二单弹优化模型，核心差异：多机协同，目标为三弹并集遮蔽时长最大化。
+策略：每机独立求全局单弹最优候选池（保留窗口中心多样化的 top 候选），再枚举
+三机组合以并集最大为目标。
+"""
+import time
+import numpy as np
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+for fp in fm.findSystemFonts():
+    if any(n in fp for n in ['SimHei', 'simhei', 'msyh', 'YaHei', 'SimSun', 'simsun']):
+        try:
+            fm.fontManager.addfont(fp)
+        except Exception:
+            pass
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+
+from core import (G, VM, R_CLOUD, MISSILES, UAVS, missile_pos, missile_hit_time,
+                  release_point, burst_point, shield_vec, shield_vec_plan,
+                  VU_MIN, VU_MAX, TARGET_AXIS)
+
+t0all = time.time()
+M0 = MISSILES['M1']
+REF = np.array([0.0, TARGET_AXIS[1], 5.0])
+
+
+def per_uav_candidates(U0, M0, REF, top_k=10, th_step=5):
+    """
+    对单机求候选解池：全航向热启动 + 每航向单弹评估，保留窗口中心多样化的候选。
+    性能优化（G-Cost）：几何构造先筛可行候选，粗步长 dt=0.05、n_phi=12 批量评估。
+    返回 list of dict(theta_deg, vu, td, dttb, U0, T, window_center)
+    """
+    cands = []
+    # 对每个航向，构造球心对准视线轴的候选
+    for th in np.arange(0, 360, th_step):
+        th_r = np.radians(th)
+        dir_xy = np.array([np.cos(th_r), np.sin(th_r)])
+        # 扫描视线窗口中心 tc（步长 1.0，粗筛用）
+        for tc in np.arange(0.5, 62, 1.0):
+            M = missile_pos(M0, tc)
+            los = REF - M
+            los_xy = los[:2]
+            nl = np.linalg.norm(los_xy)
+            if nl < 1e-6:
+                continue
+            los_xy = los_xy / nl
+            # 路径线与视线轴水平投影交点
+            A = np.column_stack([dir_xy, -los_xy])
+            b = M[:2] - U0[:2]
+            if abs(np.linalg.det(A)) < 1e-9:
+                continue
+            sol = np.linalg.solve(A, b)
+            s, lam = sol
+            if s < 0 or lam < 0:
+                continue
+            C_xy = U0[:2] + s * dir_xy
+            L3 = los / np.linalg.norm(los)
+            C_z = M[2] + lam * L3[2]
+            # 速度扫描
+            for vu in [80.0, 100.0, 120.0, 140.0]:
+                tau = s / vu
+                rhs = U0[2] - C_z - 3.0 * (tc - tau)
+                if rhs < 0:
+                    continue
+                dttb = np.sqrt(2.0 * rhs / G)
+                td = tau - dttb
+                if td < 0 or dttb < 0 or dttb > 19.0:
+                    continue
+                Pb = burst_point(release_point(U0, th, vu, td), th, vu, dttb)
+                if Pb[2] < 0:
+                    continue
+                T, iv = shield_vec(th, vu, td, dttb, U0, M0, dt=0.05, n_phi=12, n_z=2)
+                if T > 0.05:
+                    # 窗口中心（遮蔽区间的中点）
+                    wc = (iv[0][0] + iv[0][-1]) / 2 if iv else tc
+                    cands.append({'theta_deg': th, 'vu': vu, 'td': td, 'dttb': dttb,
+                                  'U0': U0, 'T': T, 'iv': iv, 'wc': wc})
+    # 去重 + 按窗口中心多样化选取 top
+    # 排序按 T 降序，取 top；同时保留不同窗口中心的候选
+    cands.sort(key=lambda c: -c['T'])
+    result = []
+    seen_wc = set()
+    for c in cands:
+        # 窗口中心按 2s 分箱去重，保证窗口多样性
+        bucket = round(c['wc'] / 2.0)
+        if bucket not in seen_wc:
+            seen_wc.add(bucket)
+            result.append(c)
+        if len(result) >= top_k:
+            break
+    # 若不足，补剩余高 T 候选
+    if len(result) < top_k:
+        for c in cands:
+            if all(c is not r for r in result):
+                result.append(c)
+            if len(result) >= top_k:
+                break
+    return result
+
+
+# =====================================================================
+# STEP1：每机候选池
+# =====================================================================
+print("[STEP1] 三机各自候选池...")
+uavs = ['FY1', 'FY2', 'FY3']
+pools = {}
+for name in uavs:
+    U0 = UAVS[name]
+    cands = per_uav_candidates(U0, M0, REF, top_k=12)
+    pools[name] = cands
+    print(f"  {name}: {len(cands)} 候选，top3 T={[round(c['T'],2) for c in cands[:3]]} 窗口中心={[round(c['wc'],1) for c in cands[:3]]}")
+
+# =====================================================================
+# STEP2：三机组合并集最大化
+# =====================================================================
+print("\n[STEP2] 三机组合并集最大化...")
+best_T = 0.0
+best_comb = None
+t_c = time.time()
+comb_count = 0
+for c1 in pools['FY1']:
+    for c2 in pools['FY2']:
+        for c3 in pools['FY3']:
+            comb_count += 1
+            T, iv = shield_vec_plan([c1, c2, c3], M0, dt=0.02, n_phi=16, n_z=2)
+            if T > best_T:
+                best_T = T
+                best_comb = (c1, c2, c3, iv)
+print(f"  组合数 {comb_count}，最优并集 T={best_T:.3f}，用时 {time.time()-t_c:.1f} s")
+
+# =====================================================================
+# STEP3：确认步长精算 + 局部精化
+# =====================================================================
+c1, c2, c3, iv0 = best_comb
+print("\n[STEP3] 确认步长精算 + 局部精化...")
+# 对每机候选做 NM 精化（保持窗口中心不变，精化 θ/vu/td/dttb）
+from scipy.optimize import minimize
+refined_comb = []
+for ci in [c1, c2, c3]:
+    def neg(x):
+        T, _ = shield_vec(x[0], x[1], x[2], x[3], ci['U0'], M0, dt=0.02, n_phi=16, n_z=2)
+        return -T
+    res = minimize(neg, np.array([ci['theta_deg'], ci['vu'], ci['td'], ci['dttb']]),
+                   method='Nelder-Mead', options={'maxiter': 300, 'xatol': 1e-4, 'fatol': 1e-4})
+    ci2 = dict(ci)
+    ci2.update({'theta_deg': res.x[0], 'vu': res.x[1], 'td': res.x[2], 'dttb': res.x[3]})
+    T, iv = shield_vec(res.x[0], res.x[1], res.x[2], res.x[3], ci['U0'], M0, dt=0.02, n_phi=16, n_z=2)
+    ci2['T'] = T
+    ci2['iv'] = iv
+    refined_comb.append(ci2)
+
+T_final, iv_final = shield_vec_plan(refined_comb, M0, dt=0.005, n_phi=48, n_z=4)
+print(f"  精化后三弹并集 T = {T_final:.4f} s")
+print(f"  遮蔽区间: {[tuple(round(x,3) for x in iv) for iv in iv_final]}")
+for idx, ci in enumerate(refined_comb):
+    name = uavs[idx]
+    T_s, iv_s = shield_vec(ci['theta_deg'], ci['vu'], ci['td'], ci['dttb'], ci['U0'], M0,
+                           dt=0.005, n_phi=48, n_z=4)
+    print(f"  {name}: θ={ci['theta_deg']:.1f}° vu={ci['vu']:.1f} td={ci['td']:.2f} dttb={ci['dttb']:.2f} 单弹T={T_s:.3f} 区间={[tuple(round(x,3) for x in a) for a in iv_s]}")
+
+# =====================================================================
+# G3：验证（每机 top 候选窗口中心已覆盖全域，组合已枚举）
+# =====================================================================
+print("\n[G3] 三机候选窗口中心覆盖验证")
+for name in uavs:
+    wcs = sorted(round(c['wc'], 1) for c in pools[name])
+    print(f"  {name} 窗口中心覆盖: [{wcs[0]}, {wcs[-1]}] s，{len(wcs)} 个时段")
+
+# =====================================================================
+# 约束复核
+# =====================================================================
+print("\n[约束复核]")
+for idx, ci in enumerate(refined_comb):
+    name = uavs[idx]
+    Pb = burst_point(release_point(ci['U0'], ci['theta_deg'], ci['vu'], ci['td']),
+                     ci['theta_deg'], ci['vu'], ci['dttb'])
+    print(f"  {name}: 起爆点高度 {Pb[2]:.1f} ≥ 0 ✓ 投放点 {np.round(release_point(ci['U0'],ci['theta_deg'],ci['vu'],ci['td']),1)}")
+
+# =====================================================================
+# 图 + 结果
+# =====================================================================
+fig, ax = plt.subplots(figsize=(9, 3.5))
+colors = ['#e74c3c', '#e67e22', '#3498db']
+for idx, ci in enumerate(refined_comb):
+    T_s, iv_s = shield_vec(ci['theta_deg'], ci['vu'], ci['td'], ci['dttb'], ci['U0'], M0,
+                           dt=0.005, n_phi=48, n_z=4)
+    for iv in iv_s:
+        ax.barh(idx + 0.5, iv[1]-iv[0], left=iv[0], height=0.4, color=colors[idx], alpha=0.7,
+                label=uavs[idx] if iv is iv_s[0] else None)
+for iv in iv_final:
+    ax.barh(0.0, iv[1]-iv[0], left=iv[0], height=0.12, color='black', alpha=0.5, label='并集')
+ax.set_xlabel('t (s)'); ax.set_yticks([])
+ax.set_title(f'问题四：三机遮蔽区间（并集 T={T_final:.3f} s）')
+ax.legend(fontsize=8)
+plt.tight_layout()
+os.makedirs('output/figures', exist_ok=True)
+plt.savefig('output/figures/q4_intervals.png', dpi=300)
+print("图已保存: output/figures/q4_intervals.png")
+
+import json
+res = {'plans': [], '并集遮蔽区间': [tuple(round(x,3) for x in iv) for iv in iv_final], 'T': round(T_final,4)}
+for idx, ci in enumerate(refined_comb):
+    name = uavs[idx]
+    Pd = release_point(ci['U0'], ci['theta_deg'], ci['vu'], ci['td'])
+    Pb = burst_point(Pd, ci['theta_deg'], ci['vu'], ci['dttb'])
+    res['plans'].append({'uav': name, 'theta': round(ci['theta_deg'],2), 'vu': round(ci['vu'],2),
+                         'td': round(ci['td'],3), 'dttb': round(ci['dttb'],3),
+                         '投放点': np.round(Pd,3).tolist(), '起爆点': np.round(Pb,3).tolist()})
+os.makedirs('output/tables', exist_ok=True)
+with open('output/tables/q4_result.json','w',encoding='utf-8') as f:
+    json.dump(res, f, ensure_ascii=False, indent=2)
+print("结果已保存: output/tables/q4_result.json")
+print(f"\n总用时 {time.time()-t0all:.1f} s")

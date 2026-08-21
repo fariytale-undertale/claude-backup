@@ -1,0 +1,234 @@
+# -*- coding: utf-8 -*-
+"""
+2025 国赛 A 题《烟幕干扰弹的投放策略》共享核心模块
+坐标系：以假目标为原点，xy 水平面，z 竖直向上。
+真目标：圆柱半径 7 m、高 10 m，下底面圆心 (0,200,0)。
+所有问题共用：导弹运动、无人机投放、弹道、云团演化、遮蔽判定、遮蔽时长聚合。
+"""
+import numpy as np
+
+# ---- 题面常量 ----
+G = 9.8          # 重力加速度 m/s^2（假设 P7）
+VM = 300.0       # 导弹飞行速度 m/s
+R_CLOUD = 10.0   # 云团有效半径 m（P1 用户确认）
+SINK = 3.0       # 云团下沉速度 m/s
+EFFECTIVE_T = 20.0  # 云团起爆后有效时长 s
+VU_MIN, VU_MAX = 70.0, 140.0   # 无人机速度范围
+DROP_GAP = 1.0    # 同机两次投放最小间隔 s
+
+# 真目标圆柱
+RT = 7.0         # 半径
+HT = 10.0        # 高
+TARGET_AXIS = np.array([0.0, 200.0, 0.0])   # 圆柱下底面圆心（轴线在 z 方向）
+
+# 导弹初始位置
+MISSILES = {
+    'M1': np.array([20000.0, 0.0, 2000.0]),
+    'M2': np.array([19000.0, 600.0, 2100.0]),
+    'M3': np.array([18000.0, -600.0, 1900.0]),
+}
+# 无人机初始位置
+UAVS = {
+    'FY1': np.array([17800.0, 0.0, 1800.0]),
+    'FY2': np.array([12000.0, 1400.0, 1400.0]),
+    'FY3': np.array([6000.0, -3000.0, 700.0]),
+    'FY4': np.array([11000.0, 2000.0, 1800.0]),
+    'FY5': np.array([13000.0, -2000.0, 1300.0]),
+}
+
+
+# ---- 运动学 ----
+def missile_pos(M0, t):
+    """导弹位置：沿直线匀速飞向原点（假目标）。M0 初始位置矢量，t 可为标量或数组。"""
+    d = np.linalg.norm(M0)
+    return M0 - VM * np.asarray(t)[..., None] * (M0 / d)
+
+
+def missile_hit_time(M0):
+    """导弹飞行至假目标所需时间。"""
+    return np.linalg.norm(M0) / VM
+
+
+def uav_pos(U0, theta_deg, vu, t):
+    """无人机位置（等高度匀速直线）。theta 为航向角，x 轴正向逆时针为正。"""
+    th = np.radians(theta_deg)
+    return U0 + vu * np.array([np.cos(th), np.sin(th), 0.0]) * t
+
+
+def release_point(U0, theta_deg, vu, td):
+    """投放点：无人机在投放时刻的位置。"""
+    return uav_pos(U0, theta_deg, vu, td)
+
+
+def burst_point(Pd, theta_deg, vu, dttb):
+    """起爆点：投放点 + 无人机水平速度矢量*dttb - 重力下沉 0.5*g*dttb^2。"""
+    th = np.radians(theta_deg)
+    return Pd + vu * np.array([np.cos(th), np.sin(th), 0.0]) * dttb - np.array([0.0, 0.0, 0.5 * G * dttb * dttb])
+
+
+def cloud_center(Pb, tb, t):
+    """云团球心：起爆点起以 3 m/s 匀速下沉。仅 t >= tb 有效。"""
+    return Pb - np.array([0.0, 0.0, SINK * (t - tb)])
+
+
+# ---- 真目标圆柱表面采样点集 ----
+def target_sample_points(n_phi=48, n_z=4, n_r=3, include_bottom=False):
+    """
+    真目标圆柱表面采样点集。
+    侧面：周向 n_phi 点 × 高度 n_z 层（z 从 0 到 HT 均匀）。
+    顶面：z=HT 圆盘，同心圆 n_r 个（半径 r 从 0 到 RT）+ 中心点。
+    可选底面（z=0 圆边缘，默认不含——导弹高空来袭，底面贴地不可见）。
+    """
+    pts = []
+    # 侧面
+    phis = np.linspace(0, 2 * np.pi, n_phi, endpoint=False)
+    zs = np.linspace(0, HT, n_z + 1)   # 含两端
+    for z in zs:
+        for phi in phis:
+            pts.append(np.array([RT * np.cos(phi), TARGET_AXIS[1] + RT * np.sin(phi), z]))
+    # 顶面圆盘
+    if n_r > 0:
+        for r in np.linspace(0, RT, n_r + 1):
+            if r == 0:
+                pts.append(np.array([0.0, TARGET_AXIS[1], HT]))
+            else:
+                for phi in phis:
+                    pts.append(np.array([r * np.cos(phi), TARGET_AXIS[1] + r * np.sin(phi), HT]))
+    # 底面圆边缘（可选）
+    if include_bottom:
+        for phi in phis:
+            pts.append(np.array([RT * np.cos(phi), TARGET_AXIS[1] + RT * np.sin(phi), 0.0]))
+    return np.array(pts)
+
+
+# ---- 遮蔽判定 ----
+def seg_sphere_hit(A, B, C, R):
+    """
+    线段 [A,B] 与球 B(C,R) 是否相交（含端点）。
+    投影参数法：球心到线段所在直线投影，clip 到 [0,1]，距离 <= R 则相交。
+    """
+    AB = B - A
+    L2 = float(np.dot(AB, AB))
+    if L2 == 0.0:
+        return float(np.linalg.norm(A - C)) <= R
+    s = np.clip(np.dot(C - A, AB) / L2, 0.0, 1.0)
+    D = A + s * AB - C
+    return float(np.dot(D, D)) <= R * R
+
+
+def is_blocked(M, S, C, R):
+    """体判据：导弹到真目标表面所有采样点的视线均被云团球截断。"""
+    for P in S:
+        if not seg_sphere_hit(M, P, C, R):
+            return False
+    return True
+
+
+def is_blocked_point(M, ref_point, C, R):
+    """点判据：导弹到参考点的视线被云团球截断。"""
+    return seg_sphere_hit(M, ref_point, C, R)
+
+
+# ---- 遮蔽时长计算（时间轴离散扫描 + 并集聚合） ----
+def shield_intervals_single(theta_deg, vu, td, dttb, U0, M0,
+                            dt=0.005, R=None, n_phi=48, n_z=4,
+                            criterion='body', ref_point=None):
+    """
+    单弹遮蔽时间区间集合。
+    返回 [(t_start, t_end), ...] 遮蔽区间的列表，以及遮蔽时长。
+    """
+    if R is None:
+        R = R_CLOUD
+    tb = td + dttb
+    Pd = release_point(U0, theta_deg, vu, td)
+    Pb = burst_point(Pd, theta_deg, vu, dttb)
+    S = target_sample_points(n_phi, n_z)
+    if criterion == 'body':
+        pass
+    # 遮蔽仅可能在云团有效时段内发生，扫描 [max(0,tb), tb+EFFECTIVE_T]
+    t0 = max(0.0, tb)
+    t1 = tb + EFFECTIVE_T
+    n = int(np.ceil((t1 - t0) / dt)) + 1
+    t_arr = t0 + dt * np.arange(n)
+    blocked = np.zeros(n, dtype=bool)
+    M_at = missile_pos(M0, t_arr)  # (n,3)
+    C_at = np.array([cloud_center(Pb, tb, t) for t in t_arr])  # (n,3)
+    if criterion == 'body':
+        # 对每个时刻判定全部采样点
+        for i in range(n):
+            blocked[i] = is_blocked(M_at[i], S, C_at[i], R)
+    else:
+        rp = ref_point if ref_point is not None else np.array([0.0, TARGET_AXIS[1], HT / 2.0])
+        for i in range(n):
+            blocked[i] = seg_sphere_hit(M_at[i], rp, C_at[i], R)
+    # 聚合为区间
+    intervals = []
+    in_block = False
+    start = 0.0
+    for i in range(n):
+        if blocked[i] and not in_block:
+            in_block = True
+            start = t_arr[i]
+        elif not blocked[i] and in_block:
+            in_block = False
+            intervals.append((start, t_arr[i]))
+    if in_block:
+        intervals.append((start, t_arr[-1]))
+    return intervals
+
+
+def shield_intervals_multiple(plans, M0, dt=0.005, R=None, n_phi=48, n_z=4,
+                              criterion='body', ref_point=None, t_span=None):
+    """
+    多弹遮蔽区间并集。
+    plans: list of dict(theta_deg, vu, td, dttb, U0)
+    t_span: (t_min, t_max) 或 None（自动取所有云团有效时段并集）
+    """
+    if R is None:
+        R = R_CLOUD
+    # 确定时间轴范围
+    if t_span is None:
+        t_lo = min(max(0.0, p['td'] + p['dttb']) for p in plans)
+        t_hi = max(p['td'] + p['dttb'] + EFFECTIVE_T for p in plans)
+    else:
+        t_lo, t_hi = t_span
+    n = int(np.ceil((t_hi - t_lo) / dt)) + 1
+    t_arr = t_lo + dt * np.arange(n)
+    M_at = missile_pos(M0, t_arr)
+    blocked = np.zeros(n, dtype=bool)
+    for p in plans:
+        tb = p['td'] + p['dttb']
+        Pd = release_point(p['U0'], p['theta_deg'], p['vu'], p['td'])
+        Pb = burst_point(Pd, p['theta_deg'], p['vu'], p['dttb'])
+        S = target_sample_points(n_phi, n_z)
+        # 该弹只在其有效时段内贡献
+        i0 = max(0, int(np.ceil((max(tb, t_lo) - t_lo) / dt)))
+        i1 = min(n, int(np.ceil((min(tb + EFFECTIVE_T, t_hi) - t_lo) / dt)) + 1)
+        for i in range(i0, i1):
+            if blocked[i]:
+                continue
+            t = t_arr[i]
+            C = cloud_center(Pb, tb, t)
+            if criterion == 'body':
+                blocked[i] = is_blocked(M_at[i], S, C, R)
+            else:
+                rp = ref_point if ref_point is not None else np.array([0.0, TARGET_AXIS[1], HT / 2.0])
+                blocked[i] = seg_sphere_hit(M_at[i], rp, C, R)
+    # 聚合
+    intervals = []
+    in_block = False
+    start = 0.0
+    for i in range(n):
+        if blocked[i] and not in_block:
+            in_block = True
+            start = t_arr[i]
+        elif not blocked[i] and in_block:
+            in_block = False
+            intervals.append((start, t_arr[i]))
+    if in_block:
+        intervals.append((start, t_arr[-1]))
+    return intervals
+
+
+def intervals_length(intervals):
+    return sum(b - a for a, b in intervals)
