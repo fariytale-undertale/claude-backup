@@ -1,0 +1,92 @@
+# -*- coding: utf-8 -*-
+"""核心模型手算最小案例验证（区分性测试前置）"""
+import numpy as np
+from common import (solar_position, dni, eta_cos, mirror_normal,
+                    mirror_axes, mirror_corners, LAT, PHI_DEG)
+
+ok = True
+def check(name, got, expect, tol=5e-3):
+    global ok
+    good = np.allclose(got, expect, atol=tol)
+    ok &= good
+    print(f"[{'PASS' if good else 'FAIL'}] {name}: got={np.round(got,4)} expect≈{expect}")
+
+print("=" * 60)
+print("手算验证 1：春分正午 (D=0, ST=12)")
+# 手算：δ=0, ω=0, sinαs=cos39.4=0.7726, γs=180°, s=(0,-0.6349,0.7726)
+s, alpha, gamma, delta, omega = solar_position(0.0, 12.0, return_all=True)
+check("δ(rad)", delta, 0.0, tol=1e-6)
+check("ω(rad)", omega, 0.0, tol=1e-6)
+check("αs(deg)", np.degrees(alpha), 90 - (PHI_DEG - 0), tol=0.5)   # 春分正午 αs=90-φ
+check("γs(deg)", np.degrees(gamma), 180.0, tol=0.5)                # 正南
+check("|s|=1", np.linalg.norm(s), 1.0, tol=1e-6)
+check("s 应指向正南偏上 (x=0,y<0,z>0)", s, [0.0, -0.6349, 0.7726], tol=1e-3)
+
+print("=" * 60)
+print("手算验证 2：春分上午9:00 (D=0, ST=9)")
+# 手算：ω=-45°, sinαs=0.5463, γs=+122.4°(东南), s=(0.7072,-0.4483,0.5463)
+s, alpha, gamma, delta, omega = solar_position(0.0, 9.0, return_all=True)
+check("αs(deg)", np.degrees(alpha), 33.1, tol=0.3)
+check("γs(deg)", np.degrees(gamma), 122.4, tol=0.3)                # 东南
+check("s 应在东南上方 (x>0,y<0,z>0)", s, [0.7072, -0.4483, 0.5463], tol=1e-3)
+check("|s|=1", np.linalg.norm(s), 1.0, tol=1e-6)
+
+print("=" * 60)
+print("手算验证 3：DNI 春分正午海拔3km")
+# 手算：a=0.34981,b=0.57839,c=0.275745, sinαs=0.7726, DNI=1.0308
+d = dni(alpha)   # alpha 此时为 9:00 的
+sN, aN, gN, _, _ = solar_position(0.0, 12.0, return_all=True)
+dnoon = dni(aN)
+check("DNI 正午(kW/m2)", dnoon, 1.0308, tol=1e-3)
+
+print("=" * 60)
+print("手算验证 4：正南镜 (0,-300,4) 春分正午余弦效率")
+# r̂=(0,300,76)/|..|=(0,0.9690,0.2455), s·r̂=-0.4255, ηcos=0.5360
+mir = np.array([0.0, -300.0, H_INST := 4.0])
+tow = np.array([0.0, 0.0, 80.0])
+r = tow - mir
+rhat = r / np.linalg.norm(r)
+check("r̂", rhat, [0.0, 0.9690, 0.2455], tol=1e-3)
+ec = eta_cos(sN[None, :], rhat[None, :])[0]
+check("ηcos", ec, 0.5360, tol=1e-3)
+n = mirror_normal(sN[None, :], rhat[None, :])[0]
+# 法线应在北偏上 (y>0, z>0, x=0)
+check("法线 n", n, [0.0, 0.3118, 0.9501], tol=1e-3)
+
+print("=" * 60)
+print("手算验证 5：镜面几何（正南镜，宽6高6安装4）")
+eh, ew = mirror_axes(n[None, :])
+# e_h = n×ẑ = (ny,-nx,0)：正南镜法线(0,0.3118,0.9501) → (0.3118,0,0) 朝东
+check("e_h(上下边=水平转轴方向=n×ẑ, 应朝东)", eh[0], [1.0, 0.0, 0.0], tol=1e-6)
+# e_w = n×e_h = (0,0.9501,-0.3118)：朝北偏下（镜面北低南高，把南边光反射向北塔）
+check("e_w(宽度方向, 应朝北偏下)", ew[0], [0.0, 0.9501, -0.3118], tol=1e-3)
+# 正交性：e_h⊥n, e_h⊥ẑ, e_w⊥e_h, e_w⊥n, 且 e_h,e_w 为单位
+check("e_h·n=0", np.dot(eh[0], n), 0.0, tol=1e-6)
+check("e_h·ẑ=0(水平)", eh[0, 2], 0.0, tol=1e-6)
+check("e_w·e_h=0", np.dot(ew[0], eh[0]), 0.0, tol=1e-6)
+check("e_w·n=0", np.dot(ew[0], n), 0.0, tol=1e-6)
+# 角点：中心(0,-300,4) ± 3e_w ± 3e_h，应保证上下边水平（z 相同）
+c1, c2, c3, c4 = mirror_corners(mir[None, :], 6.0, 6.0, n[None, :])
+# 上下边（沿 e_h 的边）：c1-c2 两端 z 相同，c3-c4 两端 z 相同（上下边平行地面）
+check("上边(沿e_h)两端 z 一致", c1[:, 2], c2[:, 2], tol=1e-6)
+check("下边(沿e_h)两端 z 一致", c3[:, 2], c4[:, 2], tol=1e-6)
+# 左右边（沿 e_w，镜面倾斜）两端 z 不同 → 镜面确实倾斜
+check("镜面宽度方向有竖直分量(倾斜)", abs(c1[0, 2] - c3[0, 2]), 1.87, tol=0.02)
+check("镜面边长6×6", np.linalg.norm(c1[0]-c2[0]), 6.0, tol=1e-9)
+
+print("=" * 60)
+print("验证 6：|s|=1 在全部 12月×5时点 恒成立")
+from common import D_MONTHS, TIMES
+Ds = np.repeat(D_MONTHS, 5)
+Ss = np.repeat(TIMES[None, :], 12, axis=0).ravel()
+all_s = solar_position(Ds, Ss)
+norms = np.linalg.norm(all_s, axis=1)
+print(f"  60 时点 |s| 范围: [{norms.min():.10f}, {norms.max():.10f}]")
+check("60 时点 |s|=1", norms, np.ones(60), tol=1e-6)
+# 太阳高度角全为正（9点后都在地平线上）？
+print(f"  60 时点 αs 范围: [{np.degrees(np.arcsin(all_s[:,2])).min():.1f}, "
+      f"{np.degrees(np.arcsin(all_s[:,2])).max():.1f}] deg")
+
+print("=" * 60)
+print("结论:", "全部通过" if ok else "存在 FAIL")
+assert ok, "核心模型手算验证未通过"
