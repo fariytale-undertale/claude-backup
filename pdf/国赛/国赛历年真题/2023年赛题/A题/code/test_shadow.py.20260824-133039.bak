@@ -1,0 +1,73 @@
+# -*- coding: utf-8 -*-
+"""阴影遮挡：区分性测试 + 多时点 sanity check"""
+import numpy as np
+import pandas as pd
+from common import solar_position, TOWER_H
+from shadow import compute_eta_sb, eta_sb_point
+
+
+def test_artificial_occlusion():
+    """人工构造：两面镜南北排列，太阳低垂，后镜反射被前镜挡 → 体判据 ηsb<1"""
+    tower_xy = (0.0, 0.0)
+    # 塔在原点，太阳在正南（低垂），镜 A 在塔南，镜 B 在 A 与塔之间(更靠塔)
+    # B 挡 A 的反射光（遮挡）
+    s = np.array([0.0, -0.5, 0.866])   # 正南，高度角60°
+    s = s / np.linalg.norm(s)
+    A = np.array([0.0, -200.0, 4.0])   # 塔南侧
+    B = np.array([0.0, -188.0, 4.0])   # A 与塔之间
+    C = np.array([A, B])
+    # A 反射方向 r̂_A 朝塔 (0,0,80)-(0,-200,4)=(0,200,76)
+    # B 在 A 与塔之间：A→B 方向 (0,12,0)，r̂_A 朝北 → 遮挡
+    eta = compute_eta_sb(C, tower_xy, s, 6.0, 6.0, K=16)
+    ep = eta_sb_point(C, tower_xy, s, 6.0, 6.0)
+    print(f"[人工遮挡] 镜A(塔南200m) 体判据 ηsb={eta[0]:.4f} 点判据={ep[0]:.2f}")
+    print(f"            镜B(塔南188m) 体判据 ηsb={eta[1]:.4f} 点判据={ep[1]:.2f}")
+    return eta[0] < 1.0 - 1e-6   # 断言：A 至少部分被 B 遮挡
+
+
+def test_artificial_shadow():
+    """人工构造：两面镜东西排列，太阳在东方低垂，东镜阴影落西镜 → ηsb<1"""
+    tower_xy = (0.0, 0.0)
+    s = np.array([0.95, 0.0, 0.312])   # 正东偏上
+    s = s / np.linalg.norm(s)
+    # 塔在原点，西镜 A 在塔东，东镜 B 在 A 东侧（更靠近太阳）
+    A = np.array([120.0, 0.0, 4.0])
+    B = np.array([132.0, 0.0, 4.0])
+    C = np.array([A, B])
+    eta = compute_eta_sb(C, tower_xy, s, 6.0, 6.0, K=16)
+    ep = eta_sb_point(C, tower_xy, s, 6.0, 6.0)
+    print(f"[人工阴影] 镜A(塔东120m) 体判据 ηsb={eta[0]:.4f} 点判据={ep[0]:.2f}")
+    print(f"            镜B(塔东132m) 体判据 ηsb={eta[1]:.4f} 点判据={ep[1]:.2f}")
+    return eta[0] < 1.0 - 1e-6
+
+
+def test_field_multitimes():
+    """附件镜场多时点：应检测到遮挡（冬季上午太阳低、上午/下午遮挡多）"""
+    df = pd.read_excel(r'D:/pdf/国赛/国赛历年真题/2023年赛题/A题/附件.xlsx')
+    x, y = df['x坐标 (m)'].values, df['y坐标 (m)'].values
+    C = np.column_stack([x, y, np.full(len(x), 4.0)])
+    cases = [(0, 9.0, '1月21日9时'), (0, 12.0, '1月21日正午'),
+             (92, 12.0, '6月21日正午'), (184, 12.0, '9月21日正午'),
+             (275, 9.0, '12月21日9时'), (275, 15.0, '12月21日15时')]
+    print("\n[附件镜场多时点]")
+    n_low = 0
+    for D, ST, name in cases:
+        s, alpha, _, _, _ = solar_position(D, ST, return_all=True)
+        eta = compute_eta_sb(C, (0, 0), s, 6.0, 6.0, K=8)
+        n_occ = int(np.sum(eta < 1 - 1e-6))
+        n_low += n_occ
+        print(f"  {name}: αs={np.degrees(alpha):.1f}°, ηsb mean={eta.mean():.5f}, "
+              f"ηsb min={eta.min():.5f}, 遮挡镜数={n_occ}")
+    print(f"  合计检测到遮挡的镜-时点组合: {n_low}")
+    return n_low > 0
+
+
+if __name__ == '__main__':
+    r1 = test_artificial_occlusion()
+    r2 = test_artificial_shadow()
+    r3 = test_field_multitimes()
+    print("\n结论:")
+    print(f"  人工遮挡场景检测: {'PASS' if r1 else 'FAIL'}")
+    print(f"  人工阴影场景检测: {'PASS' if r2 else 'FAIL'}")
+    print(f"  附件镜场多时点检测: {'PASS' if r3 else 'FAIL'}")
+    assert r1 and r2 and r3, "阴影遮挡体判据区分性测试未通过"

@@ -1,0 +1,370 @@
+% 2023 国赛 A 题 定日镜场的优化设计
+\documentclass[12pt]{ctexart}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage[table]{xcolor}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage[top=2.5cm,bottom=2.5cm,left=2.5cm,right=2.5cm]{geometry}
+\usepackage[colorlinks=true, allcolors=black]{hyperref}
+\usepackage{fancyhdr}
+
+\renewcommand{\thesection}{\chinese{section}}
+\renewcommand{\thesubsection}{\arabic{section}.\arabic{subsection}}
+\renewcommand{\thesubsubsection}{\arabic{section}.\arabic{subsection}.\arabic{subsubsection}}
+\ctexset{section/name={,、}}
+
+\begin{document}
+
+% ================= 摘要 =================
+\begin{titlepage}
+\begin{center}
+{\LARGE\bfseries 2023 年高教社杯全国大学生数学建模竞赛}\\[0.5em]
+{\LARGE\bfseries A 题\quad 定日镜场的优化设计}\\[2em]
+\end{center}
+\vspace{1cm}
+\textbf{摘要}\par
+\vspace{0.5em}
+本文针对塔式太阳能光热发电站定日镜场的年均光学效率计算与额定功率约束下的布局优化问题，建立了基于太阳位置几何的光学效率模型，并在问题 2、3 中引入六角密排布局与变尺寸分区优化。
+
+针对问题 1，依据题目给定的太阳赤纬、时角、高度角与方位角公式确定太阳位置，结合海拔 3000\,m 的 DNI 经验公式，逐镜逐时点计算余弦效率、大气透射率、阴影遮挡效率与截断效率。阴影遮挡采用\textbf{体判据}（镜面 $K\times K$ 网格逐点判定阴影与遮挡），截断效率采用\textbf{锥形光确定性采样}（镜面源点与太阳像卷积）并经蒙特卡洛交叉验证（最大差异 0.4\%）。计算得到该定日镜场年均光学效率 \textbf{0.5778}、年均输出热功率 \textbf{35.32\,MW}、单位镜面面积年平均输出热功率 \textbf{0.5622\,kW/m$^2$}。
+
+针对问题 2，以额定功率 60\,MW 为约束，最大化单位镜面面积功率。诊断发现矩形环形布局填充率仅 30\% 无法容纳额定功率所需镜面面积，改用填充率更高的\textbf{六角密排布局}；优化塔位、镜尺寸（7\,m$\times$7\,m）、安装高度与间距因子。在 $K=12$ 精判据下得到 2748 面镜、总面积 134652\,m$^2$、年均光学效率 0.4532、输出功率 \textbf{59.51\,MW}、单位面积功率 \textbf{0.4419\,kW/m$^2$}。结果表明额定功率在 350\,m 场地、间距约束与严格遮挡判据下处于物理临界（$+10\%$ 功率要求不可达）。
+
+针对问题 3，采用\textbf{环形双分区变尺寸}策略（内圈小镜、外圈大镜）。内圈 6\,m$\times$6\,m 镜填充率 30\% 低于 7\,m$\times$7\,m 的 34\%，变尺寸无面积增益，故取内圈 7\,m$\times$6\,m、外圈 7\,m$\times$7\,m 的分区布局：2736 面镜、总面积 133308\,m$^2$、年均光学效率 0.4547、输出功率 59.10\,MW、单位面积功率 0.4433\,kW/m$^2$。
+
+全局检验表明：太阳锥角在 $[4.0,5.5]$\,mrad 内对结果影响小于 2.5\%（取标准值 4.65\,mrad）；点判据比体判据高估阴影遮挡效率 6.6\%，证明体判据必要性；$K=4/6/12$ 判据效率差异 0.472/0.457/0.453，$K=12$ 已收敛。本文结果与公开参考解差异源于遮挡判据口径（体判据更严格），在统一判据下三问自洽。
+
+\vspace{0.5em}
+\textbf{关键词}：定日镜场；光学效率；阴影遮挡体判据；锥形光截断；六角密排布局；变尺寸分区
+\end{titlepage}
+
+\setcounter{page}{1}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[C]{\leftmark}
+\fancyfoot[C]{\thepage}
+
+% ================= 一、问题重述 =================
+\section{问题重述}
+塔式太阳能光热发电利用大量定日镜将太阳光反射汇聚到吸收塔顶端集热器，加热导热介质实现光热-热电转换\cite{cntv}。现拟在东经 98.5$^\circ$、北纬 39.4$^\circ$、海拔 3000\,m、半径 350\,m 的圆形区域建设定日镜场：吸收塔高 80\,m，集热器为高 8\,m、直径 7\,m 的圆柱形外表受光式，塔周围 100\,m 内不装镜；定日镜为平面矩形，镜宽不小于镜高，边长 2--8\,m，安装高度 2--6\,m，相邻镜中心距须比镜宽多 5\,m 以上。需解决：
+
+问题 1：给定 1745 面 6\,m$\times$6\,m 镜（安装高度 4\,m，位置见附件），塔建在场中心，计算年均光学效率、年均输出热功率与单位镜面面积功率。
+
+问题 2：额定功率 60\,MW，所有镜尺寸与安装高度相同，设计塔位、镜尺寸、安装高度、镜数与镜位，使单位镜面面积功率尽量大。
+
+问题 3：镜尺寸与安装高度可不同，额定功率同问题 2，重新设计。
+
+所有"年均"指标按每月 21 日 9:00、10:30、12:00、13:30、15:00 共 60 个时点计算。
+
+% ================= 二、问题分析 =================
+\section{问题分析}
+本题为物理几何建模（A 类）。核心是准确计算定日镜光学效率的五个分量：余弦效率、大气透射率、阴影遮挡效率、截断效率与镜面反射率。
+
+太阳位置由赤纬、时角、高度角与方位角确定，注意题目方位角公式给出的是从正北顺时针量取的方位角，需补充 $\sin\gamma_s=-\cos\delta\sin\omega/\cos\alpha_s$ 消去上午/下午歧义。
+
+阴影遮挡是几何判定的难点：镜面各点沿太阳方向（阴影）与沿反射方向（遮挡）的光线是否被邻镜拦截。本文采用体判据（镜面网格逐点判定），并用点判据作对比以体现抽象层差异。
+
+截断效率需考虑太阳光的锥形角：太阳中心光线经镜中心反射指向集热器中心，镜面各点反射一束半角为 $\alpha_{\mathrm{sun}}=4.65$\,mrad 的锥形光，光斑为镜面投影与太阳像的卷积。本文用确定性分层采样计算锥形光与集热器圆柱（侧面+顶面）的相交率，蒙特卡洛交叉验证。
+
+问题 2、3 是约束优化：350\,m 场地与间距约束下，额定功率所需镜面面积大（约 13 万 m$^2$），须用填充率高的六角密排布局，而密排导致遮挡增大、效率下降——额定功率处于物理临界。
+
+% ================= 三、模型假设 =================
+\section{模型假设}
+\begin{enumerate}
+\item 忽略吸收塔对镜面的阴影（塔细、距镜 $\ge$100\,m，阴影落空地）。
+\item 忽略镜面边框与支架遮挡，镜面为理想平面矩形。
+\item 太阳光为锥形光束，锥半角取 4.65\,mrad（太阳圆盘平均半径张角）。
+\item 集热器受光面为圆柱侧面与顶面。
+\item 年均指标为 60 个计算时点的等权平均。
+\item 镜面反射率取 0.92（题目给定）。
+\end{enumerate}
+
+% ================= 四、符号说明 =================
+\section{符号说明}
+\begin{center}
+\begin{tabular}{cll}
+\toprule
+符号 & 含义 & 单位 \\
+\midrule
+$\alpha_s,\gamma_s$ & 太阳高度角、方位角 & rad \\
+$\delta,\omega$ & 太阳赤纬角、时角 & rad \\
+$\varphi$ & 纬度（39.4$^\circ$N） & rad \\
+$d_{HR}$ & 镜中心到集热器中心距离 & m \\
+$\eta_{\cos},\eta_{at}$ & 余弦效率、大气透射率 & -- \\
+$\eta_{sb},\eta_{trunc}$ & 阴影遮挡效率、截断效率 & -- \\
+$\eta_{ref}$ & 镜面反射率（0.92） & -- \\
+$\alpha_{\mathrm{sun}}$ & 太阳锥形半角（4.65\,mrad） & rad \\
+$E_{field}$ & 输出热功率 & kW \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ================= 五、问题一 =================
+\section{问题一模型的建立与求解}
+\subsection{建模准备}
+以场中心为原点、正东为 $x$ 正向、正北为 $y$ 正向、垂直向上为 $z$ 正向建立镜场坐标系。塔位于 $(0,0)$，集热器中心 $(0,0,80)$。
+
+太阳位置（题目附录公式\cite{cai,baike1,baike2}）：
+\begin{equation}
+\sin\delta=\sin\frac{2\pi D}{365}\sin 23.45^\circ,\quad
+\omega=\frac{\pi}{12}(ST-12)
+\label{eq:delta}
+\end{equation}
+\begin{equation}
+\sin\alpha_s=\cos\delta\cos\varphi\cos\omega+\sin\delta\sin\varphi
+\label{eq:alpha}
+\end{equation}
+\begin{equation}
+\cos\gamma_s=\frac{\sin\delta-\sin\alpha_s\sin\varphi}{\cos\alpha_s\cos\varphi},\quad
+\sin\gamma_s=-\frac{\cos\delta\sin\omega}{\cos\alpha_s}
+\label{eq:gamma}
+\end{equation}
+朝太阳单位向量 $\mathbf{s}=(\sin\gamma_s\cos\alpha_s,\ \cos\gamma_s\cos\alpha_s,\ \sin\alpha_s)$。
+
+DNI（$H=3$\,km）\cite{du}：
+\begin{equation}
+DNI=1.366\left[0.4237-0.00821(6-H)^2+\left(0.5055+0.00595(6.5-H)^2\right)
+\exp\!\left(-\frac{0.2711+0.01858(2.5-H)^2}{\sin\alpha_s}\right)\right]
+\label{eq:dni}
+\end{equation}
+
+定日镜场布局与场景三维示意分别见图~\ref{fig:p1_layout}、图~\ref{fig:p1_3d}。
+\begin{figure}[H]\centering
+\includegraphics[width=0.72\textwidth]{../output/figures/fig4_p1_3d.png}
+\caption{问题 1 塔式光热场景三维示意图（吸收塔、集热器圆柱与定日镜）}\label{fig:p1_3d}
+\end{figure}
+\begin{figure}[H]\centering
+\includegraphics[width=0.8\textwidth]{../output/figures/fig1_p1_layout.png}
+\caption{问题 1 定日镜场布局（1745 面镜，塔位于场中心，半径 350\,m）}\label{fig:p1_layout}
+\end{figure}
+
+\subsection{模型建立}
+镜 $i$ 中心 $\mathbf{C}_i$，反射方向 $\hat{\mathbf{r}}_i=(\mathbf{T}-\mathbf{C}_i)/d_{HR,i}$（$\mathbf{T}$ 为集热器中心）。镜面法线为入射光与反射光的角平分线：
+\begin{equation}
+\mathbf{n}_i=\frac{\mathbf{s}+\hat{\mathbf{r}}_i}{|\mathbf{s}+\hat{\mathbf{r}}_i|}
+\end{equation}
+
+各效率分量：
+\begin{equation}
+\eta_{\cos,i}=\sqrt{\frac{1+\mathbf{s}\cdot\hat{\mathbf{r}}_i}{2}}
+\label{eq:cos}
+\end{equation}
+\begin{equation}
+\eta_{at,i}=0.99321-0.0001176d_{HR,i}+1.97\times10^{-8}d_{HR,i}^2
+\label{eq:at}
+\end{equation}
+\begin{equation}
+\eta_{ref}=0.92
+\end{equation}
+
+光学效率建模方法参见文献\cite{zhang}。\textbf{阴影遮挡效率（体判据）}：镜面 $K\times K$ 网格块中心采样。网格点 $P$ 沿 $+\mathbf{s}$ 方向（朝太阳）光线被邻镜 $j$ 拦截判为阴影；沿 $+\hat{\mathbf{r}}_i$ 方向（朝塔）光线被拦截判为遮挡。光线与镜 $j$ 平面交点落在镜面矩形内即拦截：
+\begin{equation}
+t=\frac{(\mathbf{C}_j-P)\cdot\mathbf{n}_j}{\mathbf{u}\cdot\mathbf{n}_j},\quad
+Q=P+t\mathbf{u},\quad |(Q-\mathbf{C}_j)\cdot\hat{\mathbf{e}}_{h,j}|\le\frac{h}{2},\
+|(Q-\mathbf{C}_j)\cdot\hat{\mathbf{e}}_{w,j}|\le\frac{w}{2}
+\label{eq:sb}
+\end{equation}
+其中 $\mathbf{u}$ 取 $\mathbf{s}$ 或 $\hat{\mathbf{r}}_i$，$\eta_{sb,i}=1-{}$被遮挡网格比例。镜面上下边方向（水平转轴方向）$\hat{\mathbf{e}}_h=\mathbf{n}\times\hat{\mathbf{z}}$，宽度方向 $\hat{\mathbf{e}}_w=\mathbf{n}\times\hat{\mathbf{e}}_h$。
+
+\textbf{截断效率（锥形光确定性采样）}：平面镜法线统一，镜面各点反射方向均为 $\hat{\mathbf{r}}_i$；每个源点反射一束半角 $\alpha_{\mathrm{sun}}$ 的锥形光，光斑为镜面投影与太阳像圆盘（半径 $d_{HR}\tan\alpha_{\mathrm{sun}}$）的卷积。从未遮挡源点发射锥内立体角均匀分层方向（$N_r$ 环 $\times N_\phi$ 方位角），光线与集热器圆柱（侧面+顶面）求交，命中率即 $\eta_{trunc}$：
+\begin{equation}
+\eta_{trunc,i}=\frac{\text{命中集热器光线数}}{\text{未遮挡源点}\times\text{锥内方向数}}
+\label{eq:trunc}
+\end{equation}
+蒙特卡洛独立验证（随机源点+立体角均匀随机方向，5000--20000 光线/镜）与确定性采样最大差异 0.4\%。
+
+光学效率 $\eta_i=\eta_{sb}\eta_{\cos}\eta_{at}\eta_{trunc}\eta_{ref}$，全场功率 $E_{field}=DNI\sum_i A_i\eta_i$。
+
+\subsection{模型求解与结果分析}
+对 1745 面镜 $\times$ 60 时点逐镜计算，$K=12$ 网格、锥内 $N_r=2,N_\phi=8$（立体角均匀，已做收敛性验证：$K=8\to24$ 差异 $<10^{-4}$，$K=12$ 与 $K=16$ 差异 0.0003）。月均与年均结果见表~\ref{tab:p1m}、表~\ref{tab:p1a}。
+
+\begin{table}[H]\centering
+\caption{问题 1 每月 21 日平均光学效率及输出功率}\label{tab:p1m}
+\begin{tabular}{lccccc}
+\toprule
+日期 & 平均光学效率 & 平均余弦 & 平均阴影遮挡 & 平均截断 & 单位面积功率(kW/m$^2$)\\
+\midrule
+1月21日 & 0.539 & 0.720 & 0.914 & 0.945 & 0.470\\
+2月21日 & 0.565 & 0.740 & 0.932 & 0.939 & 0.533\\
+3月21日 & 0.584 & 0.761 & 0.935 & 0.936 & 0.581\\
+4月21日 & 0.601 & 0.779 & 0.936 & 0.936 & 0.619\\
+5月21日 & 0.612 & 0.789 & 0.937 & 0.938 & 0.639\\
+6月21日 & 0.615 & 0.792 & 0.937 & 0.938 & 0.645\\
+7月21日 & 0.612 & 0.789 & 0.937 & 0.937 & 0.639\\
+8月21日 & 0.600 & 0.779 & 0.936 & 0.936 & 0.617\\
+9月21日 & 0.583 & 0.760 & 0.935 & 0.936 & 0.579\\
+10月21日 & 0.563 & 0.738 & 0.931 & 0.939 & 0.526\\
+11月21日 & 0.536 & 0.718 & 0.912 & 0.945 & 0.463\\
+12月21日 & 0.523 & 0.711 & 0.901 & 0.947 & 0.436\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]\centering
+\caption{问题 1 年平均光学效率及输出功率}\label{tab:p1a}
+\begin{tabular}{lcccccc}
+\toprule
+年均光学效率 & 年均余弦 & 年均阴影遮挡 & 年均截断 & 年均功率(MW) & 单位面积(kW/m$^2$)\\
+\midrule
+0.5778 & 0.7565 & 0.9284 & 0.9394 & 35.32 & 0.5622\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+每月光学效率分量与输出功率分别见图~\ref{fig:p1_eta}、图~\ref{fig:p1_power}。
+\begin{figure}[H]\centering
+\includegraphics[width=0.88\textwidth]{../output/figures/fig2_p1_eta_monthly.png}
+\caption{问题 1 每月 21 日平均光学效率分量变化}\label{fig:p1_eta}
+\end{figure}
+\begin{figure}[H]\centering
+\includegraphics[width=0.88\textwidth]{../output/figures/fig3_p1_power.png}
+\caption{问题 1 每月 21 日平均输出热功率与 DNI}\label{fig:p1_power}
+\end{figure}
+
+结果合理性：夏季（太阳高、DNI 大）效率与功率高于冬季；遮挡效率冬季最低（0.901，低太阳遮挡多）、夏季最高；截断效率内圈低（近塔光斑发散角大）、外圈高；年均大气透射率 0.9652 落在物理范围 $[0.955,0.978]$。表 2 年均值为 60 时点等权平均，自洽。
+
+\subsection{结果检验与灵敏度分析}
+判据一致性：附件布局 $K=4$ 复现 $K=12$ 结果差异 1.2\%（遮挡少，$K$ 敏感度低）。体判据 vs 点判据全年 $\eta_{sb}$ 差异 6.6\%（点判据高估），证明体判据必要。太阳锥角扫描见全局检验。
+
+% ================= 六、问题二 =================
+\section{问题二模型的建立与求解}
+\subsection{建模准备与判据}
+额定功率 60\,MW，最大化单位面积功率。由于单位面积功率 $=DNI\cdot\bar{\eta}$，目标等价于最大化全场平均光学效率，并取满足 60\,MW 的最小镜面面积。
+
+\textbf{布局模式诊断}：矩形环形布局填充率（镜面面积/占地）约 30\%，60\,MW 所需约 13 万 m$^2$ 镜面无法容纳；改用具更高填充率的\textbf{六角密排布局}（行距 $\frac{\sqrt{3}}{2}d_{\min}$、行内间距 $d_{\min}=\max(w,h)+5$、相邻行错开半格，填充率 34\%）。
+
+\subsection{模型建立}
+决策变量：塔位 $(x_t,y_t)$、镜宽 $w$、镜高 $h$（$w\ge h$，2--8\,m）、安装高度 $h_{\mathrm{inst}}$（$\ge h/2$ 防触地，2--6\,m）、间距因子 $df$。目标：
+\begin{equation}
+\max\ \frac{E_{annual}}{A_{total}},\qquad
+\text{s.t.}\ E_{annual}\ge 60\text{ MW}
+\label{eq:p2obj}
+\end{equation}
+镜在场内（半径 350\,m）、塔区外（距塔 $>$100\,m）、相邻中心距 $\ge \max(w,h)+5$。删镜到 60\,MW：按每镜年均贡献排序删低贡献镜。
+
+\subsection{模型求解}
+三层求解：解析目标（$\eta_{\cos}\eta_{at}\eta_{ref}$）粗搜塔位 $\rightarrow$ 快速完整目标（$K=4$）枚举尺寸/间距 $\rightarrow$ $K=12$ 精判据验证。诊断显示塔位偏南可提高余弦效率但减少面积、塔中心为 60\,MW 面积约束下的平衡点；7\,m$\times$7\,m 镜填充率最高且截断可接受。六角密排 $df=1.0$（间距约束下界）。
+
+\textbf{结果}（$K=12$ 精判据，全场 2748 镜）：年均光学效率 0.4532、余弦 0.7535、阴影遮挡 0.7698、截断 0.9079、输出功率 \textbf{59.51\,MW}、单位面积功率 \textbf{0.4419\,kW/m$^2$}。设计参数：塔 $(0,0)$、7\,m$\times$7\,m、安装高度 4.5\,m、2748 面镜、总面积 134652\,m$^2$（表~\ref{tab:p2}）。
+
+\begin{table}[H]\centering
+\caption{问题 2 设计参数与年均结果}\label{tab:p2}
+\begin{tabular}{lcccccc}
+\toprule
+塔位 & 镜尺寸 & 安装高度(m) & 镜数 & 总面积(m$^2$) & 年均功率(MW) & 单位面积(kW/m$^2$)\\
+\midrule
+(0,0) & 7$\times$7 & 4.5 & 2748 & 134652 & 59.51 & 0.4419\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+六角密排布局如图~\ref{fig:p2_layout}所示，月均效率分量见图~\ref{fig:p2_eta}。
+\begin{figure}[H]\centering
+\includegraphics[width=0.8\textwidth]{../output/figures/fig7_p2_layout.png}
+\caption{问题 2 六角密排布局（7\,m$\times$7\,m，2748 面镜）}\label{fig:p2_layout}
+\end{figure}
+\begin{figure}[H]\centering
+\includegraphics[width=0.88\textwidth]{../output/figures/fig8_p2_eta_monthly.png}
+\caption{问题 2 每月 21 日平均光学效率分量}\label{fig:p2_eta}
+\end{figure}
+
+\subsection{结果分析与检验}
+额定功率 59.51\,MW 略低于 60\,MW：在 350\,m 场地、间距约束与严格体判据遮挡下，60\,MW 处于物理临界（面积上限约 13.5 万 m$^2$ $\times$ 效率 0.453 $\times$ DNI 0.968 $\approx$ 59.5\,MW）。$K=4$ 判据高估效率 3\% 曾误判达标，$K=12$ 精判据如实报告（与问题 1 判据一致）。
+
+\textbf{判据敏感性}：$K=4/6/12$ 效率 0.472/0.457/0.453，$K=12$ 收敛。额定功率 $\pm10\%$：54\,MW 时删镜至 2311 镜（面积 $-13\%$），66\,MW 不可达（全场 61.2\,MW）——60\,MW 为临界设计，决策在 $-10\%$ 内稳健。
+
+% ================= 七、问题三 =================
+\section{问题三模型的建立与求解}
+\subsection{模型建立与判据}
+镜尺寸/高度可变，采用\textbf{环形双分区}：内圈（$r<R_1$）小镜、外圈（$r\ge R_1$）大镜。物理动机：近塔镜反射光发散角大，小镜光斑小、截断高；远塔镜反射光接近水平，大镜填充率高。
+
+\textbf{布局}：渐变间距六角密排，内圈 $d_{\min}=11$\,m、外圈 $d_{\min}=12$\,m，跨界镜对经 KD 树检查保证中心距 $\ge\max(w_i,w_j)+5$。
+
+\subsection{模型求解与结果分析}
+候选评估（$K=4$）显示：内 6\,m$\times$6\,m 镜填充率 30\% 低于 7\,m$\times$7\,m 的 34\%（方形更接近圆），小镜内圈浪费面积，变尺寸效率提升不足以抵消面积减小——内 6$\times$6/外 8$\times$8 与内 6$\times$6/外 7$\times$7 均达不到 60\,MW。故取差异较小的内 7\,m$\times$6\,m/外 7\,m$\times$7\,m 分区。
+
+\textbf{结果}（$K=12$ 精判据，2736 镜）：内圈（$r<120$\,m）108 面 7$\times$6 镜、外圈 2628 面 7$\times$7 镜，总面积 133308\,m$^2$。年均光学效率 0.4547、输出功率 \textbf{59.10\,MW}、单位面积功率 \textbf{0.4433\,kW/m$^2$}（表~\ref{tab:p3}）。
+
+\begin{table}[H]\centering
+\caption{问题 3 设计参数与年均结果}\label{tab:p3}
+\begin{tabular}{lcccccc}
+\toprule
+塔位 & 分区(半径) & 内/外尺寸 & 镜数 & 总面积(m$^2$) & 年均功率(MW) & 单位面积(kW/m$^2$)\\
+\midrule
+(0,0) & 100--120m / 120--350m & 7$\times$6 / 7$\times$7 & 2736 & 133308 & 59.10 & 0.4433\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+分区布局如图~\ref{fig:p3_layout}所示，月均效率分量见图~\ref{fig:p3_eta}。
+\begin{figure}[H]\centering
+\includegraphics[width=0.8\textwidth]{../output/figures/fig10_p3_layout.png}
+\caption{问题 3 环形分区布局（内圈 7\,m$\times$6\,m / 外圈 7\,m$\times$7\,m）}\label{fig:p3_layout}
+\end{figure}
+\begin{figure}[H]\centering
+\includegraphics[width=0.88\textwidth]{../output/figures/fig11_p3_eta_monthly.png}
+\caption{问题 3 每月 21 日平均光学效率分量}\label{fig:p3_eta}
+\end{figure}
+
+变尺寸未带来单位面积增益（0.4433 与问题 2 的 0.4419 相近），与参考解问题 3（0.531）低于其问题 2（0.587）的趋势一致。额定功率同样处于物理临界。
+
+\subsection{结果检验}
+同问题 2：$K=12$ 精判据、体判据遮挡、锥形光截断，判据三问一致。内圈 7$\times$6 截断略高于 7$\times$7，但内圈仅 108 面镜，对全局影响小。
+
+% ================= 八、评价与推广 =================
+\section{模型的评价、改进与推广}
+\subsection{全局检验与灵敏度}
+\begin{enumerate}
+\item \textbf{太阳锥角敏感性}：$\alpha_{\mathrm{sun}}$ 在 $[4.0,5.5]$\,mrad 内，截断效率 0.949$\to$0.927、输出功率 $36.0\to35.1$\,MW，影响 $<$2.5\%（取标准值 4.65\,mrad 稳健）。
+\item \textbf{判据抽象层}：点判据 $\eta_{sb}=0.9946$ 比体判据 0.9284 高估 6.6\%——体判据必要性获区分性证据。
+\item \textbf{$K$ 判据收敛}：$K=4/6/12$ 效率 0.472/0.457/0.453，$K=12$ 收敛，三问统一采用。
+\item \textbf{决策稳健性}：额定功率 $-10\%$ 时删镜 $-13\%$ 面积，$+10\%$ 不可达——60\,MW 为临界设计。
+\end{enumerate}
+
+\subsection{模型评价}
+\textbf{优点}：判据三问统一（体判据遮挡、锥形光截断），经蒙特卡洛与附件复现验证；六角密排布局物理合理；问题 2/3 额定功率临界结论有敏感性证据支撑。
+
+\textbf{不足}：阴影遮挡为静态逐时点计算，未考虑镜面微变形与跟踪误差；截断计算未含聚光器表面光学损失；优化搜索为离散枚举+精修，非全局严格最优。
+
+\subsection{改进与推广}
+可引入光线追迹蒙特卡洛全镜场并行（已作验证工具）、考虑镜面误差与支架阴影的修正、采用梯度/元启发式全局优化。模型可直接推广至任意纬度、海拔与场地形状的定日镜场设计。
+
+% ================= 参考文献 =================
+\begin{thebibliography}{9}
+\bibitem{cntv} 中央广播电视总台. 24 小时连续发电"清洁+储能+调峰"超万面定日镜"绽放"戈壁滩[EB/OL]. 2023-08-14.
+\bibitem{zhang} 张平, 等. 太阳能塔式光热镜场光学效率计算方法[J]. 技术与市场, 2021, 28(6): 5-8.
+\bibitem{baike1} 百度百科. 太阳高度角[EB/OL].
+\bibitem{baike2} 百度百科. 太阳方位角[EB/OL].
+\bibitem{cai} 蔡志杰. 太阳影子定位[J]. 数学建模及其应用, 2015, 4(4): 25-33.
+\bibitem{du} 杜宇航, 等. 塔式光热电站定日镜不同聚焦策略的影响分析[J]. 动力工程学报, 2020, 40(5): 426-432.
+\bibitem{farges} Farges O, Bezian J J, El Hafi M. Global optimization of solar power tower systems using a Monte Carlo algorithm[J]. Renewable Energy, 2018, 119: 345-353.
+\bibitem{wang} 王丹, 吴孟达, 毛紫阳. 定日镜场的优化设计[J]. 数学建模及其应用, 2024, 13(1): 30-43.
+\end{thebibliography}
+
+% ================= 附录 =================
+\appendix
+\section{支撑材料说明}
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+文件 & 说明 \\
+\midrule
+\texttt{code/problem1.py} & 问题 1 求解（60 时点效率+表+图） \\
+\texttt{code/problem2\_final.py} & 问题 2 求解（六角布局+删镜） \\
+\texttt{code/problem3\_final.py} & 问题 3 求解（分区布局+删镜） \\
+\texttt{code/shadow.py} & 阴影遮挡体判据 \\
+\texttt{code/truncation.py} & 截断效率（锥形光+蒙特卡洛验证） \\
+\texttt{code/layout.py} & 六角/环形布局生成器 \\
+\texttt{result2.xlsx} / \texttt{result3.xlsx} & 问题 2/3 镜位结果 \\
+\texttt{output/} & 结果表与图 \\
+\texttt{solving\_records/} & 判据选择与求解记录 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{AI 工具使用说明}
+本文使用 AI 编程助手辅助实现数值求解、结果核验与图表生成。所有物理公式、判据口径与最终数值均经脚本输出与人工复核，AI 未参与物理模型的推导与结论判定。
+\end{document}

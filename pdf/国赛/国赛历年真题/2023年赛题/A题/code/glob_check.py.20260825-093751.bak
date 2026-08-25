@@ -1,0 +1,76 @@
+# -*- coding: utf-8 -*-
+"""全局检验：锥角扫描 / 60MW 稳健性 / 点体判据对比 / K 敏感性。"""
+import numpy as np, pandas as pd, time, json
+from common import (solar_position, TOWER_H, ETA_REF, mirror_normal, D_MONTHS,
+                    TIMES, eta_cos, eta_at)
+from shadow import compute_eta_sb, eta_sb_point
+from truncation import compute_eta_trunc
+
+OUT = r'D:/pdf/国赛/国赛历年真题/2023年赛题/A题/output'
+res = {}
+
+# ---------- 1) 太阳锥角扫描（问题1 附件布局，每月正午 12 时点，K=8） ----------
+df = pd.read_excel(r'D:/pdf/国赛/国赛历年真题/2023年赛题/A题/附件.xlsx')
+x, y = df['x坐标 (m)'].values, df['y坐标 (m)'].values
+C = np.column_stack([x, y, np.full(len(x), 4.0)])
+t12 = [(D, 12.0) for D in D_MONTHS]
+alphas = [4.0, 4.3, 4.65, 5.0, 5.5]
+print("=== 1) 太阳锥角扫描（问题1 附件布局, 每月正午, K=8）===", flush=True)
+tr_base = None
+cone_rows = []
+for a in alphas:
+    tr_sum = 0.0
+    for D, ST in t12:
+        s, _, _, _, _ = solar_position(D, ST, return_all=True)
+        tr_sum += compute_eta_trunc(C, (0, 0), s, 6.0, 6.0, K=8, Nr=2, Nphi=8,
+                                    alpha_sun=a * 1e-3).mean() / len(t12)
+    # 光学效率变化（其他分量用问题1 年均）
+    eta_trunc_avg = tr_sum
+    # 问题1 K=12: cos 0.7565, at 0.9652, sb 0.9284, ref 0.92
+    eta_opt = 0.7565 * 0.9652 * 0.9284 * eta_trunc_avg * 0.92
+    E = eta_opt * 0.968 * (len(C) * 36) / 1000.0
+    cone_rows.append({'alpha_mrad': a, 'eta_trunc': eta_trunc_avg,
+                      'eta_opt': eta_opt, 'E_MW': E})
+    print(f"  α={a} mrad: ηtrunc={eta_trunc_avg:.4f} η={eta_opt:.4f} E={E:.1f}MW", flush=True)
+res['cone'] = cone_rows
+
+# ---------- 2) 60MW ±10% 决策稳健性（问题2/3 布局，K=4 口径删镜） ----------
+print("\n=== 2) 60MW ±10% 决策稳健性（K=4 口径）===", flush=True)
+from layout import hex_layout
+from p3_grad import hex_zone_grad
+from problem2_final import mirror_contrib as contrib2
+from problem3 import mirror_contrib as contrib3
+
+# 问题2 布局
+C2 = hex_layout((0, 0), 7, 7, 4.5, 1.0)
+w2 = np.full(len(C2), 7.0)
+# 问题3 布局
+C3, w3, h3 = hex_zone_grad((0.0, 0.0), 120.0, 7.0, 6.0, 7.0, 7.0)
+for name, Cc, ww, hh, p3flag in [('问题2', C2, w2, w2, False), ('问题3', C3, w3, h3, True)]:
+    contrib = contrib3(Cc, ww, hh, (0, 0), K=4) if p3flag else contrib2(Cc, (0, 0), 7.0, 7.0, K=4)
+    order = np.argsort(-contrib)
+    cum = np.cumsum(contrib[order])
+    A_i = ww * hh
+    print(f"  {name}: 全场 N={len(Cc)} E_full={cum[-1]/1000:.1f}MW", flush=True)
+    for target in [54.0, 60.0, 66.0]:
+        if cum[-1] / 1000 >= target:
+            nk = min(int(np.searchsorted(cum, target * 1000)) + 1, len(Cc))
+            A_sel = A_i[order[:nk]].sum()
+            print(f"    额定 {target:.0f}MW: 保留 {nk}/{len(Cc)}镜, A={A_sel:.0f}m2", flush=True)
+        else:
+            print(f"    额定 {target:.0f}MW: 全场 E={cum[-1]/1000:.1f}MW 不足", flush=True)
+
+# ---------- 3) 点判据 vs 体判据（附件布局，全年平均） ----------
+print("\n=== 3) 遮挡判据点/体对比（附件布局）===", flush=True)
+sb_body = sb_pt = 0.0
+for D in D_MONTHS:
+    for ST in TIMES:
+        s, _, _, _, _ = solar_position(D, ST, return_all=True)
+        sb_body += compute_eta_sb(C, (0, 0), s, 6.0, 6.0, K=12).mean() / 60.0
+        sb_pt += eta_sb_point(C, (0, 0), s, 6.0, 6.0).mean() / 60.0
+print(f"  体判据 ηsb={sb_body:.4f} vs 点判据 ηsb={sb_pt:.4f}，差异 {sb_pt-sb_body:.4f}", flush=True)
+res['point_vs_body'] = {'body': sb_body, 'point': sb_pt}
+
+json.dump(res, open(OUT + '/glob_check.json', 'w', encoding='utf-8'),
+          ensure_ascii=False, indent=2, default=float)
+print("\n全局检验完成，已保存", flush=True)

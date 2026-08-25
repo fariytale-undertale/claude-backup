@@ -1,0 +1,182 @@
+# -*- coding: utf-8 -*-
+"""
+问题3：变尺寸/高度镜场优化。60MW 额定功率，最大化单位镜面面积功率。
+
+判据（继承问题2 + 用户确认）：环形 2 分区（内圈小镜 / 外圈大镜）；
+体判据遮挡、锥形光截断、受光面侧面+顶面、锥角 4.65mrad；E≥60MW 取最小面积。
+
+布局：均匀六角密排（网格间距 = 外圈 dmin，保证跨界相邻镜中心距 ≥ max(w_i,w_j)+5），
+每镜尺寸/高度按距塔半径分配：r<R1 → 内圈小镜，r≥R1 → 外圈大镜。
+"""
+import numpy as np, pandas as pd, time, json, os
+from common import (D_MONTHS, MONTH_NAMES, TIMES, TOWER_H, ETA_REF,
+                    solar_position, dni, mirror_normal, eta_cos, eta_at,
+                    R_FIELD, R_TOWER_CLEAR)
+from shadow import compute_eta_sb
+from truncation import compute_eta_trunc
+
+OUT = r'D:/pdf/国赛/国赛历年真题/2023年赛题/A题/output'
+TIMES60 = [(D, ST) for D in D_MONTHS for ST in TIMES]
+
+
+def hex_zone_layout(tower_xy, R1, w_in, h_in, w_out, h_out,
+                    R_field=350.0, R_clear=100.0):
+    """分区六角布局：均匀网格间距 = max(w_out,h_out)+5。
+    返回 (C (N,3), w_arr (N,), h_arr (N,))。"""
+    dmin = max(w_out, h_out) + 5.0
+    dy = np.sqrt(3) / 2.0 * dmin
+    xt, yt = tower_xy
+    rlim = R_field - np.hypot(w_out, h_out) / 2.0
+    centers, ws, hs = [], [], []
+    k_max = int(np.ceil((R_field + np.hypot(xt, yt)) / dy)) + 1
+    for k in range(-k_max, k_max + 1):
+        y = yt + k * dy
+        if abs(y) > rlim + 0.5 * dmin:
+            continue
+        off = 0.5 * (k % 2) * dmin
+        m_lo = int(np.floor((xt - rlim - off) / dmin))
+        m_hi = int(np.ceil((xt + rlim - off) / dmin))
+        for m in range(m_lo, m_hi + 1):
+            x = xt + off + m * dmin
+            if np.hypot(x, y) <= rlim:
+                r = np.hypot(x - xt, y - yt)
+                if r <= R_clear + 1e-9:
+                    continue
+                if r < R1:
+                    w, h = w_in, h_in
+                else:
+                    w, h = w_out, h_out
+                h_inst = max(4.0, h / 2 + 0.5)
+                centers.append([x, y, h_inst])
+                ws.append(w)
+                hs.append(h)
+    return np.array(centers), np.array(ws), np.array(hs)
+
+
+def eval_zone(C, w_arr, h_arr, tower_xy, K=4):
+    """完整评估（K 网格，变尺寸）。返回 (η_avg 面积加权, E MW)。"""
+    N = len(C)
+    A_i = w_arr * h_arr
+    A_tot = A_i.sum()
+    tw = np.array([tower_xy[0], tower_xy[1], TOWER_H])
+    rv = tw - C
+    dHR = np.linalg.norm(rv, axis=1)
+    r_hat = rv / dHR[:, None]
+    eta_sum = 0.0
+    e_sum = 0.0
+    for D, ST in TIMES60:
+        s, alpha, _, _, _ = solar_position(D, ST, return_all=True)
+        d = dni(alpha)
+        n = mirror_normal(np.broadcast_to(s, (N, 3)), r_hat)
+        cos = np.sqrt((1.0 + s @ r_hat.T) / 2.0)
+        at = eta_at_(dHR)
+        sb = compute_eta_sb(C, tower_xy, s, w_arr, h_arr, K=K)
+        tr = compute_eta_trunc(C, tower_xy, s, w_arr, h_arr, K=K, Nr=2, Nphi=8)
+        eta = cos * at * sb * tr * ETA_REF
+        eta_sum += (eta * A_i).sum() / A_tot
+        e_sum += d * (eta * A_i).sum()
+    n60 = len(TIMES60)
+    return eta_sum / n60, e_sum / n60 / 1000.0
+
+
+def eta_at_(dHR):
+    return 0.99321 - 0.0001176 * dHR + 1.97e-8 * dHR ** 2
+
+
+def mirror_contrib(C, w_arr, h_arr, tower_xy, K=4):
+    """每镜年均功率贡献(kW)，用于 60MW 删镜。"""
+    N = len(C)
+    A_i = w_arr * h_arr
+    tw = np.array([tower_xy[0], tower_xy[1], TOWER_H])
+    rv = tw - C
+    dHR = np.linalg.norm(rv, axis=1)
+    r_hat = rv / dHR[:, None]
+    contrib = np.zeros(N)
+    for D, ST in TIMES60:
+        s, alpha, _, _, _ = solar_position(D, ST, return_all=True)
+        d = dni(alpha)
+        n = mirror_normal(np.broadcast_to(s, (N, 3)), r_hat)
+        cos = np.sqrt((1.0 + s @ r_hat.T) / 2.0)
+        at = eta_at_(dHR)
+        sb = compute_eta_sb(C, tower_xy, s, w_arr, h_arr, K=K)
+        tr = compute_eta_trunc(C, tower_xy, s, w_arr, h_arr, K=K, Nr=2, Nphi=8)
+        eta = cos * at * sb * tr * ETA_REF
+        contrib += d * A_i * eta / len(TIMES60)
+    return contrib
+
+
+def build_tables(C, w_arr, h_arr, tower_xy, K=4):
+    """表1/表2（变尺寸面积加权）。"""
+    N = len(C)
+    A_i = w_arr * h_arr
+    A_tot = A_i.sum()
+    tw = np.array([tower_xy[0], tower_xy[1], TOWER_H])
+    rv = tw - C
+    dHR = np.linalg.norm(rv, axis=1)
+    r_hat = rv / dHR[:, None]
+    cos = np.zeros((12, 5, N)); at = np.zeros((12, 5, N))
+    sb = np.zeros((12, 5, N)); tr = np.zeros((12, 5, N))
+    dni_t = np.zeros((12, 5))
+    for mi, D in enumerate(D_MONTHS):
+        for ti, ST in enumerate(TIMES):
+            s, alpha, _, _, _ = solar_position(D, ST, return_all=True)
+            dni_t[mi, ti] = dni(alpha)
+            n = mirror_normal(np.broadcast_to(s, (N, 3)), r_hat)
+            cos[mi, ti] = np.sqrt((1.0 + s @ r_hat.T) / 2.0)
+            at[mi, ti] = eta_at_(dHR)
+            sb[mi, ti] = compute_eta_sb(C, tower_xy, s, w_arr, h_arr, K=K)
+            tr[mi, ti] = compute_eta_trunc(C, tower_xy, s, w_arr, h_arr, K=K, Nr=2, Nphi=8)
+    eta = cos * at * sb * tr * ETA_REF
+    E_field = dni_t * (A_i[None, None, :] * eta).sum(axis=2)
+    eta_avg_t = (A_i[None, None, :] * eta).sum(axis=2) / A_tot
+    monthly = []
+    for mi in range(12):
+        monthly.append({
+            '日期': MONTH_NAMES[mi] + '21日',
+            '平均光学效率': eta_avg_t[mi].mean(),
+            '平均余弦效率': (cos[mi] * A_i[None, :]).sum(axis=1).mean() / A_tot,
+            '平均阴影遮挡效率': (sb[mi] * A_i[None, :]).sum(axis=1).mean() / A_tot,
+            '平均截断效率': (tr[mi] * A_i[None, :]).sum(axis=1).mean() / A_tot,
+            '单位面积镜面平均输出热功率(kW/m2)': (dni_t[mi] * eta_avg_t[mi]).mean(),
+        })
+    annual = {
+        '年平均光学效率': eta_avg_t.mean(),
+        '年平均余弦效率': (cos * A_i[None, None, :]).sum(axis=(0, 2)).mean() / A_tot,
+        '年平均阴影遮挡效率': (sb * A_i[None, None, :]).sum(axis=(0, 2)).mean() / A_tot,
+        '年平均截断效率': (tr * A_i[None, None, :]).sum(axis=(0, 2)).mean() / A_tot,
+        '年平均输出热功率(MW)': E_field.mean() / 1000.0,
+        '单位面积镜面年平均输出热功率(kW/m2)': (dni_t * eta_avg_t).mean(),
+    }
+    return pd.DataFrame(monthly), pd.DataFrame([annual])
+
+
+if __name__ == '__main__':
+    t_all = time.time()
+    tower = (0.0, 0.0)
+    # 候选：分区半径 × 尺寸组合
+    cands = []
+    for (w_in, h_in, w_out, h_out) in [(6, 6, 8, 8), (6, 6, 7, 7), (5, 5, 8, 8)]:
+        for R1 in [160, 200, 240]:
+            cands.append((w_in, h_in, w_out, h_out, R1))
+    results = []
+    for (w_in, h_in, w_out, h_out, R1) in cands:
+        C, w_arr, h_arr = hex_zone_layout(tower, R1, w_in, h_in, w_out, h_out)
+        if len(C) < 100:
+            continue
+        t0 = time.time()
+        eta, E = eval_zone(C, w_arr, h_arr, tower, K=4)
+        A_tot = (w_arr * h_arr).sum()
+        fit = -eta if E >= 60.0 else 1e6 + (60 - E)
+        r = dict(win=w_in, hin=h_in, wout=w_out, hout=h_out, R1=R1,
+                 N=len(C), A=A_tot, eta=eta, E=E, fit=fit)
+        results.append(r)
+        print(f"内{win}x{hin}外{wout}x{hout} R1={R1}: N={len(C)} A={A_tot:.0f} "
+              f"η={eta:.5f} E={E:.2f}MW 耗时{time.time()-t0:.0f}s", flush=True)
+    results.sort(key=lambda d: d['fit'])
+    print(f"\nTop5: 总耗时 {time.time()-t_all:.0f}s", flush=True)
+    for r in results[:5]:
+        print(f"  内{r['win']}x{r['hin']}外{r['wout']}x{r['hout']} R1={r['R1']} "
+              f"N={r['N']} η={r['eta']:.4f} E={r['E']:.1f}MW", flush=True)
+    # 保存候选供后续删镜/出表
+    with open(os.path.join(OUT, 'problem3_candidates.json'), 'w', encoding='utf-8') as f:
+        json.dump(results, f, ensure_ascii=False, indent=2, default=float)

@@ -1,0 +1,131 @@
+# -*- coding: utf-8 -*-
+"""
+核心物理模型：太阳位置、DNI、镜面法线、镜面几何、各光学效率分量。
+
+坐标约定（镜场坐标系）：
+    x 正东，y 正北，z 垂直向上。原点 = 圆形场中心。
+
+太阳方位角 gamma_s 约定（关键符号约定，已手算验证）：
+    题目公式 cos(gamma_s) = (sin δ − sin αs·sin φ)/(cos αs·cos φ) 给出的是
+    「从正北顺时针量取」的方位角 Az（北=0, 东=90, 南=180, 西=270）。
+    为区分上午/下午，须补充 sin(gamma_s) = −cos δ·sin ω / cos αs。
+    → gamma_s = atan2(−cosδ·sinω, (sinδ − sinαs·sinφ)/(cosαs·cosφ))。
+    验证：春分正午 φ=39.4° 得 gamma_s=180°（正南），上午 9 时得 +122.4°（东南），正确。
+
+太阳方向单位向量（朝太阳）：
+    s = (sin γs·cos αs, cos γs·cos αs, sin αs)   [北=γs=0]
+"""
+import numpy as np
+
+# ---------- 物理常量 ----------
+PHI_DEG = 39.4          # 纬度（北纬，deg）
+LAT = np.radians(PHI_DEG)
+H_KM = 3.0              # 海拔 (km)
+G0 = 1.366              # 太阳常数 (kW/m2)
+TOWER_H = 80.0          # 吸收塔/集热器中心高度 (m)
+COLLECTOR_H = 8.0       # 集热器高度 (m)
+COLLECTOR_D = 7.0       # 集热器直径 (m)
+COLLECTOR_R = COLLECTOR_D / 2.0
+R_FIELD = 350.0         # 场半径 (m)
+R_TOWER_CLEAR = 100.0   # 塔周围空地半径 (m)
+ETA_REF = 0.92          # 镜面反射率
+SUN_HALF_ANGLE = 4.65e-3  # 太阳锥形半角 (rad)，主算取值
+W_SPEC = 6.0            # 问题1镜宽
+H_SPEC = 6.0            # 问题1镜高
+H_INST_SPEC = 4.0       # 问题1安装高度
+
+# 每月21日的 D 值（春分 3月21日 为第 0 天；1/2 月为跨年前负值）
+D_MONTHS = np.array([-59, -28, 0, 31, 61, 92, 122, 153, 184, 214, 245, 275],
+                    dtype=float)
+MONTH_NAMES = ['1月', '2月', '3月', '4月', '5月', '6月',
+               '7月', '8月', '9月', '10月', '11月', '12月']
+# 计算时点（当地时间）
+TIMES = np.array([9.0, 10.5, 12.0, 13.5, 15.0])
+
+
+def solar_position(D, ST, lat=LAT, return_all=False):
+    """计算太阳位置。D=春分起算天数，ST=当地时间(h)。
+    返回朝太阳单位向量 s。
+    """
+    delta = np.arcsin(np.sin(2 * np.pi * D / 365.0) * np.sin(np.radians(23.45)))
+    omega = np.pi / 12.0 * (ST - 12.0)
+    sin_alpha = np.cos(delta) * np.cos(lat) * np.cos(omega) + np.sin(delta) * np.sin(lat)
+    sin_alpha = np.clip(sin_alpha, -1.0, 1.0)
+    alpha = np.arcsin(sin_alpha)
+    cos_alpha = np.cos(alpha)
+    # 天顶/接近天顶保护
+    eps = 1e-10
+    cos_gamma = np.where(cos_alpha > eps,
+                         (np.sin(delta) - sin_alpha * np.sin(lat)) / (cos_alpha * np.cos(lat)),
+                         0.0)
+    sin_gamma = np.where(cos_alpha > eps, -np.cos(delta) * np.sin(omega) / cos_alpha, 0.0)
+    gamma = np.mod(np.arctan2(sin_gamma, cos_gamma), 2 * np.pi)   # 从正北顺时针，规范化 [0,2π)
+    s = np.stack([np.sin(gamma) * cos_alpha,
+                  np.cos(gamma) * cos_alpha,
+                  sin_alpha], axis=-1)
+    if return_all:
+        return s, alpha, gamma, delta, omega
+    return s
+
+
+def dni(alpha, H_km=H_KM):
+    """法向直接辐射辐照度 (kW/m2)。alpha 为太阳高度角。"""
+    a = 0.4237 - 0.00821 * (6.0 - H_km) ** 2
+    b = 0.5055 + 0.00595 * (6.5 - H_km) ** 2
+    c = 0.2711 + 0.01858 * (2.5 - H_km) ** 2
+    sa = np.sin(alpha)
+    return G0 * (a + b * np.exp(-c / np.maximum(sa, 1e-6)))
+
+
+def mirror_normal(s, r_hat):
+    """镜面法线 = 入射光 s 与反射方向 r_hat 的角平分线（单位向量）。"""
+    v = s + r_hat
+    return v / np.linalg.norm(v, axis=-1, keepdims=True)
+
+
+def eta_cos(s, r_hat):
+    """余弦效率 = cos(入射角) = sqrt((1 + s·r_hat)/2)。"""
+    dot = np.sum(s * r_hat, axis=-1)
+    return np.sqrt((1.0 + dot) / 2.0)
+
+
+def eta_at(d_HR):
+    """大气透射效率，仅依赖镜中心到集热器中心距离 d_HR。"""
+    return 0.99321 - 0.0001176 * d_HR + 1.97e-8 * d_HR ** 2
+
+
+def mirror_axes(n):
+    """镜面局部正交基：e_h 上下边方向（水平，法线水平投影方向），
+    e_w 宽度方向 = n × e_h。返回 (e_h, e_w)。"""
+    nh = n[..., :2]
+    norm = np.linalg.norm(nh, axis=-1, keepdims=True)
+    e_h = np.where(norm > 1e-10, nh / np.maximum(norm, 1e-10), 0.0)
+    # 法线垂直向上时水平投影为零，退化处理：取任意水平方向
+    e_h = np.where(norm > 1e-10, e_h,
+                   np.tile(np.array([1.0, 0.0]), nh.shape[:-1] + (1,)))
+    e_h3 = np.concatenate([e_h, np.zeros(nh.shape[:-1] + (1,))], axis=-1)
+    e_w = np.cross(n, e_h3)
+    return e_h3, e_w
+
+
+def mirror_corners(center, w, h, n):
+    """镜面四角点（体）。center 为镜中心 (N,3)，w 宽，h 高，n 法线。"""
+    e_h, e_w = mirror_axes(n)
+    # 角点 = 中心 ± (w/2)e_w ± (h/2)e_h
+    c1 = center + 0.5 * w * e_w + 0.5 * h * e_h
+    c2 = center + 0.5 * w * e_w - 0.5 * h * e_h
+    c3 = center - 0.5 * w * e_w + 0.5 * h * e_h
+    c4 = center - 0.5 * w * e_w - 0.5 * h * e_h
+    return c1, c2, c3, c4
+
+
+def mirror_grid_points(center, w, h, n, K):
+    """镜面 K×K 网格点（用于阴影遮挡/截断采样）。返回 (N, K*K, 3)。"""
+    e_h, e_w = mirror_axes(n)
+    u = np.linspace(-1, 1, K)
+    v = np.linspace(-1, 1, K)
+    U, V = np.meshgrid(u, v, indexing='ij')   # U 沿宽度? 定义：网格坐标 (i,j)
+    # 令 U 对应宽度方向 e_w，V 对应高度方向 e_h
+    off = (0.5 * w * np.tile(e_w[:, None, :], (1, K * K, 1)) * U.ravel()[None, :, None]
+           + 0.5 * h * np.tile(e_h[:, None, :], (1, K * K, 1)) * V.ravel()[None, :, None])
+    return center[:, None, :] + off

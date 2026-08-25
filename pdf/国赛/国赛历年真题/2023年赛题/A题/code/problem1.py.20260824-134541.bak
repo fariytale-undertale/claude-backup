@@ -1,0 +1,269 @@
+# -*- coding: utf-8 -*-
+"""
+问题1：给定镜场（塔在中心，1745面6×6m镜，安装高度4m），计算
+年平均光学效率、年平均输出热功率、单位镜面面积年平均输出热功率。
+
+效率：η = ηsb·ηcos·ηat·ηtrunc·ηref
+   ηcos: 余弦效率；ηat: 大气透射；ηsb: 阴影遮挡（体判据 K=12）；
+   ηtrunc: 截断效率（锥形光确定性采样 K=12,Nr=2,Nphi=8）；ηref=0.92。
+年均 = 12个月21日 × 5时点(9,10.5,12,13.5,15) 共60时点平均。
+"""
+import numpy as np
+import pandas as pd
+import time
+import json
+import os
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+
+from common import (D_MONTHS, MONTH_NAMES, TIMES, TOWER_H, ETA_REF, W_SPEC, H_SPEC,
+                    H_INST_SPEC, R_FIELD, R_TOWER_CLEAR, SUN_HALF_ANGLE,
+                    solar_position, dni, mirror_normal, eta_cos, eta_at,
+                    mirror_axes, mirror_corners)
+from shadow import compute_eta_sb
+from truncation import compute_eta_trunc
+from figures import savefig, C_PAL, FIG_DIR
+
+ATTACH = r'D:/pdf/国赛/国赛历年真题/2023年赛题/A题/附件.xlsx'
+OUT = r'D:/pdf/国赛/国赛历年真题/2023年赛题/A题/output'
+
+
+def load_field():
+    df = pd.read_excel(ATTACH)
+    x = df['x坐标 (m)'].values
+    y = df['y坐标 (m)'].values
+    C = np.column_stack([x, y, np.full(len(x), H_INST_SPEC)])
+    return C, x, y
+
+
+def compute_all_eta(C, tower_xy=(0.0, 0.0), w=W_SPEC, h=H_SPEC):
+    """60时点全效率计算。返回 dict of arrays (12,5,N)。"""
+    N = len(C)
+    tw = np.array([tower_xy[0], tower_xy[1], TOWER_H])
+    rv = tw - C
+    dHR = np.linalg.norm(rv, axis=1)          # 镜-集热器距离
+    r_hat = rv / dHR[:, None]
+
+    eta_cos = np.zeros((12, 5, N))
+    eta_at = np.zeros((12, 5, N))
+    eta_sb = np.zeros((12, 5, N))
+    eta_tr = np.zeros((12, 5, N))
+    dni_t = np.zeros((12, 5))
+    alpha_t = np.zeros((12, 5))
+
+    for mi, D in enumerate(D_MONTHS):
+        for ti, ST in enumerate(TIMES):
+            s, alpha, _, _, _ = solar_position(D, ST, return_all=True)
+            alpha_t[mi, ti] = np.degrees(alpha)
+            dni_t[mi, ti] = dni(alpha)
+            sb = np.broadcast_to(s, (N, 3))
+            n = mirror_normal(sb, r_hat)
+            eta_cos[mi, ti] = eta_cos_(s, r_hat)
+            eta_at[mi, ti] = eta_at_(dHR)
+            eta_sb[mi, ti] = compute_eta_sb(C, tower_xy, s, w, h, K=12)
+            eta_tr[mi, ti] = compute_eta_trunc(C, tower_xy, s, w, h,
+                                               alpha_sun=SUN_HALF_ANGLE,
+                                               K=12, Nr=2, Nphi=8)
+    return dict(eta_cos=eta_cos, eta_at=eta_at, eta_sb=eta_sb, eta_tr=eta_tr,
+                dni=dni_t, alpha=alpha_t, dHR=dHR)
+
+
+def eta_cos_(s, r_hat):
+    return np.sqrt((1.0 + s @ r_hat.T) / 2.0)   # (N,)
+
+
+def eta_at_(dHR):
+    return 0.99321 - 0.0001176 * dHR + 1.97e-8 * dHR ** 2
+
+
+def main():
+    C, x, y = load_field()
+    N = len(C)
+    A = W_SPEC * H_SPEC
+    print(f"载入 {N} 面镜，单镜面积 {A} m²，总面积 {N*A:.1f} m²")
+
+    t0 = time.time()
+    res = compute_all_eta(C)
+    dt = time.time() - t0
+    print(f"60时点全效率计算耗时 {dt:.1f}s")
+
+    eta_cos, eta_at = res['eta_cos'], res['eta_at']
+    eta_sb, eta_tr = res['eta_sb'], res['eta_tr']
+    dni_t, alpha_t = res['dni'], res['alpha']
+    dHR = res['dHR']
+
+    eta = eta_cos * eta_at * eta_sb * eta_tr * ETA_REF     # (12,5,N)
+    E_field = dni_t * (A * eta).sum(axis=2)    # (12,5) kW
+    eta_avg_t = (eta * A).sum(axis=2) / (A * N)            # (12,5) 面积加权平均
+
+    # ---- 表1：每月21日（5时点平均）----
+    monthly = []
+    for mi in range(12):
+        monthly.append({
+            '日期': MONTH_NAMES[mi] + '21日',
+            '平均光学效率': eta_avg_t[mi].mean(),
+            '平均余弦效率': (eta_cos[mi] * A).sum(axis=1).mean() / (A * N),
+            '平均阴影遮挡效率': (eta_sb[mi] * A).sum(axis=1).mean() / (A * N),
+            '平均截断效率': (eta_tr[mi] * A).sum(axis=1).mean() / (A * N),
+            '单位面积镜面平均输出热功率(kW/m2)': (dni_t[mi] * eta_avg_t[mi]).mean(),
+        })
+    df1 = pd.DataFrame(monthly)
+
+    # ---- 表2：年均 ----
+    annual = {
+        '年平均光学效率': eta_avg_t.mean(),
+        '年平均余弦效率': (eta_cos * A).sum(axis=2).mean() / (A * N),
+        '年平均阴影遮挡效率': (eta_sb * A).sum(axis=2).mean() / (A * N),
+        '年平均截断效率': (eta_tr * A).sum(axis=2).mean() / (A * N),
+        '年平均输出热功率(MW)': E_field.mean() / 1000.0,
+        '单位面积镜面年平均输出热功率(kW/m2)': (dni_t * eta_avg_t).mean(),
+    }
+    df2 = pd.DataFrame([annual])
+
+    print("\n===== 表1 每月21日平均 =====")
+    print(df1.round(6).to_string(index=False))
+    print("\n===== 表2 年均 =====")
+    print(df2.round(6).to_string(index=False))
+
+    # ---- 保存 ----
+    os.makedirs(os.path.join(OUT, 'tables'), exist_ok=True)
+    df1.to_excel(os.path.join(OUT, 'tables', '表1_问题1_月均.xlsx'), index=False)
+    df2.to_excel(os.path.join(OUT, 'tables', '表2_问题1_年均.xlsx'), index=False)
+    df1.to_csv(os.path.join(OUT, 'tables', '表1_问题1_月均.csv'), index=False,
+               encoding='utf-8-sig')
+    np.savez(os.path.join(OUT, 'problem1_eta.npz'),
+             eta_cos=eta_cos, eta_at=eta_at, eta_sb=eta_sb, eta_tr=eta_tr,
+             eta=eta, E_field=E_field, dni=dni_t, alpha=alpha_t)
+    with open(os.path.join(OUT, 'problem1_results.json'), 'w', encoding='utf-8') as f:
+        json.dump({'monthly': monthly, 'annual': annual}, f, ensure_ascii=False, indent=2)
+
+    # ---- 图 ----
+    plot_all(C, x, y, df1, df2, eta_cos, eta_at, eta_sb, eta_tr, eta,
+             E_field, dni_t, alpha_t, dHR)
+    print("\n问题1求解完成")
+
+
+def plot_all(C, x, y, df1, df2, eta_cos, eta_at, eta_sb, eta_tr, eta,
+             E_field, dni_t, alpha_t, dHR):
+    A = W_SPEC * H_SPEC
+    N = len(C)
+    months = np.arange(1, 13)
+
+    # 图1 镜场布局
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.scatter(x, y, s=6, c=C_PAL[0], alpha=0.7, label=f'定日镜 ({N}面)')
+    circle1 = plt.Circle((0, 0), R_FIELD, fill=False, ec='k', lw=1.5, ls='--',
+                         label=f'场边界 (R={R_FIELD}m)')
+    circle2 = plt.Circle((0, 0), R_TOWER_CLEAR, fill=False, ec='r', lw=1, ls=':',
+                         label=f'塔区 (R={R_TOWER_CLEAR}m)')
+    ax.add_patch(circle1)
+    ax.add_patch(circle2)
+    ax.plot(0, 0, 'r^', ms=14, label='吸收塔')
+    ax.set_xlabel('x (m)')
+    ax.set_ylabel('y (m)')
+    ax.set_aspect('equal')
+    ax.set_title('定日镜场布局（问题1，塔位于场中心）')
+    ax.legend(loc='upper right', fontsize=9)
+    savefig(fig, 'fig1_p1_layout.png')
+
+    # 图2 各效率月变化
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(months, df1['平均余弦效率'], 'o-', label='余弦效率', color=C_PAL[0])
+    ax.plot(months, df1['平均阴影遮挡效率'], 's-', label='阴影遮挡效率', color=C_PAL[1])
+    ax.plot(months, df1['平均截断效率'], '^-', label='截断效率', color=C_PAL[2])
+    ax.plot(months, df1['平均光学效率'], 'd-', label='光学效率', color=C_PAL[3], lw=2)
+    ax.set_xlabel('月份')
+    ax.set_ylabel('效率')
+    ax.set_xticks(months)
+    ax.set_xlim(0.5, 12.5)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=9)
+    ax.set_title('问题1 每月21日平均光学效率分量变化')
+    savefig(fig, 'fig2_p1_eta_monthly.png')
+
+    # 图3 月输出功率与DNI
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+    ax1.bar(months, E_field.mean(axis=1) / 1000.0, color=C_PAL[0], alpha=0.7,
+            label='月平均输出热功率')
+    ax1.set_xlabel('月份')
+    ax1.set_ylabel('输出热功率 (MW)', color=C_PAL[0])
+    ax1.set_xticks(months)
+    ax2 = ax1.twinx()
+    ax2.plot(months, dni_t.mean(axis=1), 'r--o', label='月平均DNI')
+    ax2.set_ylabel('DNI (kW/m²)', color='r')
+    ax1.grid(alpha=0.3)
+    ax1.set_title('问题1 每月21日平均输出热功率与DNI')
+    savefig(fig, 'fig3_p1_power.png')
+
+    # 图4 3D 场景示意图（塔+集热器+抽样镜+光线）
+    fig = plt.figure(figsize=(9, 7))
+    ax = fig.add_subplot(111, projection='3d')
+    zcyl = np.linspace(TOWER_H - 4, TOWER_H + 4, 50)
+    th = np.linspace(0, 2 * np.pi, 50)
+    T, TH = np.meshgrid(zcyl, th)
+    Xc = 3.5 * np.cos(TH)
+    Yc = 3.5 * np.sin(TH)
+    ax.plot_surface(Xc, Yc, T, alpha=0.35, color=C_PAL[0], label='集热器圆柱')
+    ax.plot([0, 0], [0, 0], [0, 76], 'k-', lw=2)   # 塔身
+    # 抽样镜
+    rng = np.random.default_rng(1)
+    sel = rng.choice(len(C), 12, replace=False)
+    for i in sel:
+        c = C[i]
+        rv = np.array([0, 0, TOWER_H]) - c
+        r_hat = rv / np.linalg.norm(rv)
+        s = np.array([0.4, -0.3, 0.86])
+        s = s / np.linalg.norm(s)
+        from common import mirror_normal, mirror_axes
+        n = mirror_normal(s[None], r_hat[None])[0]
+        eh, ew = mirror_axes(n[None])
+        corners = np.array([
+            c + 3 * ew[0] + 3 * eh[0], c + 3 * ew[0] - 3 * eh[0],
+            c - 3 * ew[0] - 3 * eh[0], c - 3 * ew[0] + 3 * eh[0], c + 3 * ew[0] + 3 * eh[0]])
+        ax.plot(corners[:, 0], corners[:, 1], corners[:, 2], color=C_PAL[3], lw=1)
+    # 光线示意（从3面镜到集热器）
+    for i in sel[:3]:
+        c = C[i]
+        vec = np.array([0, 0, TOWER_H]) - c
+        ax.plot([c[0], c[0] + vec[0] * 0.4], [c[1], c[1] + vec[1] * 0.4],
+                [c[2], c[2] + vec[2] * 0.4], 'y-', lw=1)
+    ax.set_box_aspect([1, 1, 1])
+    ax.set_xlabel('x (m)')
+    ax.set_ylabel('y (m)')
+    ax.set_zlabel('z (m)')
+    ax.set_title('问题1 塔式光热场景示意图')
+    savefig(fig, 'fig4_p1_3d.png')
+
+    # 图5 截断/遮挡效率随半径分布
+    r = np.hypot(x, y)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    rbin = np.arange(100, 351, 25)
+    sb_r = np.array([eta_sb.mean(axis=(0, 1))[(r >= lo) & (r < hi)].mean()
+                     for lo, hi in zip(rbin[:-1], rbin[1:])])
+    tr_r = np.array([eta_tr.mean(axis=(0, 1))[(r >= lo) & (r < hi)].mean()
+                     for lo, hi in zip(rbin[:-1], rbin[1:])])
+    rc = (rbin[:-1] + rbin[1:]) / 2
+    ax.plot(rc, sb_r, 's-', label='阴影遮挡效率', color=C_PAL[1])
+    ax.plot(rc, tr_r, '^-', label='截断效率', color=C_PAL[2])
+    ax.set_xlabel('距塔半径 (m)')
+    ax.set_ylabel('效率')
+    ax.grid(alpha=0.3)
+    ax.legend()
+    ax.set_title('问题1 阴影遮挡/截断效率随半径分布（年均）')
+    savefig(fig, 'fig5_p1_radial.png')
+
+    # 图6 全年太阳高度角变化（12个月×5时点）
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for ti, st in enumerate([9.0, 12.0, 15.0]):
+        ax.plot(months, alpha_t[:, ti], 'o-', label=f'{st:.0f}:00', color=C_PAL[ti])
+    ax.set_xlabel('月份')
+    ax.set_ylabel('太阳高度角 (°)')
+    ax.set_xticks(months)
+    ax.grid(alpha=0.3)
+    ax.legend()
+    ax.set_title('问题1 每月21日太阳高度角')
+    savefig(fig, 'fig6_p1_sun.png')
+
+
+if __name__ == '__main__':
+    main()

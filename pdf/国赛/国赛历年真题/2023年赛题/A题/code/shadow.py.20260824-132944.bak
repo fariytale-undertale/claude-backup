@@ -1,0 +1,177 @@
+# -*- coding: utf-8 -*-
+"""
+阴影遮挡效率 ηsb —— 体判据（镜面 K×K 网格化）。
+
+阴影：镜 i 网格点 P 沿 +s 方向（朝太阳）的光线被镜 j 拦截。
+遮挡：镜 i 网格点 P 沿 +r̂_i 方向（朝塔）的光线被镜 j 拦截。
+ηsb_i = 1 − (被阴影或遮挡覆盖的网格点数) / K²
+
+算法：
+  1) 全对粗筛（投影分量 + 横向距离），缩小候选镜对
+  2) 对候选对精确判断：光线与镜 j 平面求交 → 交点是否落在镜 j 矩形内
+  3) 被遮挡网格点取并集（一个点可能被多镜遮挡）
+"""
+import numpy as np
+from common import (TOWER_H, mirror_normal, mirror_axes, mirror_grid_points,
+                    mirror_corners)
+
+
+def compute_eta_sb(C, tower_xy, s, w, h, K=8, th_extra=1.5):
+    """
+    C: (N,3) 镜中心（含 z=安装高度）
+    tower_xy: (2,) 塔水平坐标
+    s: (3,) 朝太阳单位向量
+    w,h: 镜宽/高
+    K: 网格分辨率
+    返回 eta_sb (N,)
+    """
+    N = len(C)
+    tw = np.array([tower_xy[0], tower_xy[1], TOWER_H], dtype=float)
+    rv = tw - C
+    dHR = np.linalg.norm(rv, axis=1)
+    r_hat = rv / dHR[:, None]
+
+    s_b = np.broadcast_to(s, (N, 3))
+    n = mirror_normal(s_b, r_hat)
+    eh, ew = mirror_axes(n)
+    grid = mirror_grid_points(C, w, h, n, K)   # (N, K2, 3)
+    K2 = K * K
+
+    # ---- 粗筛 ----
+    # dC[i,j] = C_i − C_j
+    dC = C[:, None, :] - C[None, :, :]
+    dC2 = np.einsum('ijk,ijk->ij', dC, dC)
+    not_self = ~np.eye(N, dtype=bool)
+    diag = np.sqrt(w * w + h * h)
+    th = diag + th_extra
+
+    # 阴影候选：j 在 i 的太阳方向前方 (dC[i,j]·s < 0) 且横向距离 < th
+    proj_s = dC @ s
+    lat_s = np.sqrt(np.maximum(dC2 - proj_s ** 2, 0))
+    cand_shadow = (proj_s < 0) & (lat_s < th) & not_self
+
+    # 遮挡候选：j 在 i 与塔之间 (0 < dC[i,j]·r̂_i < dHR_i) 且横向距离 < th
+    proj_r = np.einsum('ijk,ik->ij', dC, r_hat)
+    lat_r = np.sqrt(np.maximum(dC2 - proj_r ** 2, 0))
+    cand_occl = (proj_r > 0) & (proj_r < dHR[:, None]) & (lat_r < th) & not_self
+
+    # ---- 精确判断 ----
+    blocked = np.zeros((N, K2), dtype=bool)
+
+    # 阴影精确
+    iidx, jidx = np.nonzero(cand_shadow)
+    if len(iidx):
+        P = grid[iidx]                         # (M,K2,3)
+        Cj = C[jidx][:, None, :]               # (M,1,3)
+        nj = n[jidx][:, None, :]               # (M,1,3)
+        sdotn = np.einsum('j,j->j', n[jidx], s)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            t = np.sum((Cj - P) * nj, axis=-1) / sdotn[:, None]
+        Q = P + t[:, :, None] * s[None, None, :]
+        QmCj = Q - Cj
+        u = np.sum(QmCj * eh[jidx][:, None, :], axis=-1)
+        v = np.sum(QmCj * ew[jidx][:, None, :], axis=-1)
+        m = ((t > 0) & (np.abs(u) <= h / 2 + 1e-9)
+             & (np.abs(v) <= w / 2 + 1e-9)
+             & (np.abs(sdotn)[:, None] > 1e-12))
+        np.logical_or.at(blocked, iidx, m)
+
+    # 遮挡精确
+    iidx, jidx = np.nonzero(cand_occl)
+    if len(iidx):
+        P = grid[iidx]
+        Cj = C[jidx][:, None, :]
+        nj = n[jidx][:, None, :]
+        ri = r_hat[iidx]
+        ridotn = np.sum(ri * n[jidx], axis=1)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            t = np.sum((Cj - P) * nj, axis=-1) / ridotn[:, None]
+        Q = P + t[:, :, None] * ri[:, None, :]
+        QmCj = Q - Cj
+        u = np.sum(QmCj * eh[jidx][:, None, :], axis=-1)
+        v = np.sum(QmCj * ew[jidx][:, None, :], axis=-1)
+        m = ((t > 0) & (t < dHR[iidx][:, None])
+             & (np.abs(u) <= h / 2 + 1e-9)
+             & (np.abs(v) <= w / 2 + 1e-9)
+             & (np.abs(ridotn)[:, None] > 1e-12))
+        np.logical_or.at(blocked, iidx, m)
+
+    frac = blocked.sum(axis=1) / K2
+    return 1.0 - frac
+
+
+def eta_sb_point(C, tower_xy, s, w, h):
+    """点判据（仅镜中心，用于对比/区分性测试）。返回 eta_sb ∈{0,1} (N,)"""
+    N = len(C)
+    tw = np.array([tower_xy[0], tower_xy[1], TOWER_H], dtype=float)
+    rv = tw - C
+    dHR = np.linalg.norm(rv, axis=1)
+    r_hat = rv / dHR[:, None]
+    s_b = np.broadcast_to(s, (N, 3))
+    n = mirror_normal(s_b, r_hat)
+    eh, ew = mirror_axes(n)
+
+    dC = C[:, None, :] - C[None, :, :]
+    dC2 = np.einsum('ijk,ijk->ij', dC, dC)
+    not_self = ~np.eye(N, dtype=bool)
+    diag = np.sqrt(w * w + h * h)
+    th = diag + 0.5
+
+    proj_s = dC @ s
+    lat_s = np.sqrt(np.maximum(dC2 - proj_s ** 2, 0))
+    cand_shadow = (proj_s < 0) & (lat_s < th) & not_self
+    proj_r = np.einsum('ijk,ik->ij', dC, r_hat)
+    lat_r = np.sqrt(np.maximum(dC2 - proj_r ** 2, 0))
+    cand_occl = (proj_r > 0) & (proj_r < dHR[:, None]) & (lat_r < th) & not_self
+
+    blocked = np.zeros(N, dtype=bool)
+    iidx, jidx = np.nonzero(cand_shadow)
+    if len(iidx):
+        C_i = C[iidx]
+        C_j = C[jidx]
+        sdotn = np.sum(n[jidx] * s, axis=1)
+        t = np.sum((C_j - C_i) * n[jidx], axis=1) / sdotn
+        Q = C_i + t[:, None] * s
+        u = np.sum((Q - C_j) * eh[jidx], axis=1)
+        v = np.sum((Q - C_j) * ew[jidx], axis=1)
+        m = (t > 0) & (np.abs(u) <= h / 2 + 1e-9) & (np.abs(v) <= w / 2 + 1e-9) \
+            & (np.abs(sdotn) > 1e-12)
+        blocked[iidx] |= m
+    iidx, jidx = np.nonzero(cand_occl)
+    if len(iidx):
+        C_i = C[iidx]
+        C_j = C[jidx]
+        ri = r_hat[iidx]
+        ridotn = np.sum(ri * n[jidx], axis=1)
+        t = np.sum((C_j - C_i) * n[jidx], axis=1) / ridotn
+        Q = C_i + t[:, None] * ri
+        u = np.sum((Q - C_j) * eh[jidx], axis=1)
+        v = np.sum((Q - C_j) * ew[jidx], axis=1)
+        m = (t > 0) & (t < dHR[iidx]) & (np.abs(u) <= h / 2 + 1e-9) \
+            & (np.abs(v) <= w / 2 + 1e-9) & (np.abs(ridotn) > 1e-12)
+        blocked[iidx] |= m
+    return 1.0 - blocked.astype(float)
+
+
+if __name__ == '__main__':
+    import time
+    import pandas as pd
+    from common import solar_position
+
+    df = pd.read_excel(r'D:/pdf/国赛/国赛历年真题/2023年赛题/A题/附件.xlsx')
+    x, y = df['x坐标 (m)'].values, df['y坐标 (m)'].values
+    C = np.column_stack([x, y, np.full(len(x), 4.0)])
+
+    # 性能测试：夏季正午（遮挡最严重时点）
+    s, alpha, gamma, _, _ = solar_position(92.0, 12.0, return_all=True)  # 6月21日正午
+    t0 = time.time()
+    eta = compute_eta_sb(C, (0, 0), s, 6.0, 6.0, K=8)
+    t1 = time.time()
+    print(f"N={len(C)} 单时点 K=8 耗时 {t1-t0:.2f}s")
+    print(f"ηsb 分布: min={eta.min():.5f} mean={eta.mean():.5f} "
+          f"<1的镜数={np.sum(eta<1-1e-6)}")
+    # 哪些镜遮挡最严重
+    worst = np.argsort(eta)[:10]
+    print("遮挡最严重 10 镜 (idx, x, y, ηsb):")
+    for i in worst:
+        print(f"  {i}: ({x[i]:.1f},{y[i]:.1f}) ηsb={eta[i]:.5f}")

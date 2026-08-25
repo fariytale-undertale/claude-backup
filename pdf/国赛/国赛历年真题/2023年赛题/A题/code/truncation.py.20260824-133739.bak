@@ -1,0 +1,195 @@
+# -*- coding: utf-8 -*-
+"""
+截断效率 ηtrunc —— 锥形光模型。
+
+物理模型（公理 A2/A3/A4 推导）：
+  平面镜法线统一 n_i，太阳光平行 → 镜面各点反射方向相同 r̂_i（镜中心→集热器中心）。
+  太阳为锥形光（半角 α_sun）→ 镜面每个点反射一个锥，锥轴 = r̂_i。
+  光斑 = 镜面投影形状 ⊕ 太阳像圆盘（卷积）。
+  ηtrunc = 从未遮挡区域反射的锥光中命中集热器（圆柱侧面+顶面）的能量比例。
+
+实现（确定性分层采样）：
+  镜面 K×K 块中心源点，用阴影遮挡掩码排除被遮挡源点；
+  每源点发射锥内确定性方向（中心 + 环层）；
+  光线与集热器圆柱求交，命中率 = ηtrunc。
+
+验证：蒙特卡洛随机光线（立体角均匀采样）交叉验证。
+"""
+import numpy as np
+from common import (TOWER_H, COLLECTOR_H, COLLECTOR_R, mirror_normal,
+                    mirror_axes, mirror_grid_points)
+from shadow import compute_blocked_mask
+
+Z_BOT = TOWER_H - COLLECTOR_H / 2.0   # 76
+Z_TOP = TOWER_H + COLLECTOR_H / 2.0   # 84
+
+
+def cone_basis(a):
+    """锥轴 a 的两个正交切向量 u1, u2。"""
+    zaxis = np.array([0.0, 0.0, 1.0])
+    ref = zaxis if abs(a[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    u1 = np.cross(a, ref)
+    u1 = u1 / np.linalg.norm(u1)
+    u2 = np.cross(a, u1)
+    return u1, u2
+
+
+def ray_hits_collector(P, d, tower_xy):
+    """光线 X(t)=P+t·d 与集热器圆柱（侧面+顶面）相交。P:(M,3), d:(M,3)。
+    返回布尔命中 (M,)。"""
+    cx, cy = tower_xy
+    px = P[:, 0] - cx
+    py = P[:, 1] - cy
+    aa = np.maximum(d[:, 0] ** 2 + d[:, 1] ** 2, 1e-12)
+    bb = 2.0 * (px * d[:, 0] + py * d[:, 1])
+    cc = px ** 2 + py ** 2 - COLLECTOR_R ** 2
+    disc = bb ** 2 - 4.0 * aa * cc
+    valid = disc >= 0
+    sq = np.sqrt(np.maximum(disc, 0.0))
+    t1 = (-bb - sq) / (2.0 * aa)
+    t2 = (-bb + sq) / (2.0 * aa)
+    # 最小正根
+    tpos = np.minimum(np.where(t1 > 0, t1, np.inf), np.where(t2 > 0, t2, np.inf))
+    zz = P[:, 2] + tpos * d[:, 2]
+    hit_side = valid & np.isfinite(tpos) & (zz >= Z_BOT - 1e-9) & (zz <= Z_TOP + 1e-9)
+    # 顶面 z=Z_TOP
+    with np.errstate(divide='ignore', invalid='ignore'):
+        tt = (Z_TOP - P[:, 2]) / d[:, 2]
+    xq = P[:, 0] + tt * d[:, 0]
+    yq = P[:, 1] + tt * d[:, 1]
+    hit_top = (d[:, 2] > 0) & (tt > 0) & ((xq - cx) ** 2 + (yq - cy) ** 2 <= COLLECTOR_R ** 2 + 1e-9)
+    return hit_side | hit_top
+
+
+def cone_directions(a, Nr=2, Nphi=8, alpha=4.65e-3):
+    """确定性锥内方向（Nr 环 × Nphi），按立体角均匀分层（物理正确权重）。
+    第 j 环代表立体角 Ω/Nr，代表极角 cosθ_j = 1−(j+0.5)(1−cosα)/Nr。
+    返回 (Nr*Nphi, 3) 单位方向。"""
+    u1, u2 = cone_basis(a)
+    dirs = []
+    for j in range(Nr):
+        ct = 1.0 - (j + 0.5) * (1.0 - np.cos(alpha)) / Nr
+        theta = np.arccos(np.clip(ct, -1.0, 1.0))
+        st = np.sin(theta)
+        for k in range(Nphi):
+            phi = 2 * np.pi * k / Nphi
+            d = np.cos(theta) * a + st * (np.cos(phi) * u1 + np.sin(phi) * u2)
+            dirs.append(d)
+    return np.array(dirs)
+
+
+def compute_eta_trunc(C, tower_xy, s, w, h, alpha_sun=4.65e-3,
+                      K=12, Nr=2, Nphi=8, th_extra=1.5):
+    """
+    确定性采样截断效率。
+    C:(N,3) 镜中心含z。返回 (N,)。
+    """
+    N = len(C)
+    tw = np.array([tower_xy[0], tower_xy[1], TOWER_H], dtype=float)
+    rv = tw - C
+    dHR = np.linalg.norm(rv, axis=1)
+    r_hat = rv / dHR[:, None]
+    s_b = np.broadcast_to(s, (N, 3))
+    n = mirror_normal(s_b, r_hat)
+    src = mirror_grid_points(C, w, h, n, K)          # (N,K²,3)
+    mask = compute_blocked_mask(C, tower_xy, s, w, h, K, th_extra)  # (N,K²)
+
+    eta = np.zeros(N)
+    for i in range(N):
+        Ps = src[i][~mask[i]]                        # 未遮挡源点 (Ms,3)
+        if len(Ps) == 0:
+            eta[i] = 0.0
+            continue
+        Ds = cone_directions(r_hat[i], Nr, Nphi, alpha_sun)  # (Nd,3)
+        P = np.repeat(Ps, len(Ds), axis=0)
+        d = np.tile(Ds, (len(Ps), 1))
+        hit = ray_hits_collector(P, d, tower_xy)
+        eta[i] = hit.mean()
+    return eta
+
+
+def eta_trunc_mc(C, tower_xy, s, w, h, alpha_sun=4.65e-3, n_rays=5000, seed=0,
+                 full_C=None, K=12):
+    """蒙特卡洛随机光线（独立验证）。
+    源点在未遮挡区域内连续均匀采样（从未遮挡 K×K 块内取连续坐标），
+    锥内方向立体角均匀随机。full_C 提供时用全场的遮挡掩码（场景与全场一致）。
+    返回 ηtrunc (N,)。"""
+    rng = np.random.default_rng(seed)
+    N = len(C)
+    tw = np.array([tower_xy[0], tower_xy[1], TOWER_H], dtype=float)
+    rv = tw - C
+    r_hat = rv / np.linalg.norm(rv, axis=1, keepdims=True)
+    s_b = np.broadcast_to(s, (N, 3))
+    n = mirror_normal(s_b, r_hat)
+    eh, ew = mirror_axes(n)
+    mask_C = full_C if full_C is not None else C
+    mask = compute_blocked_mask(mask_C, tower_xy, s, w, h, K=K)  # (Nmask, K²)
+    # 若 C 是 full_C 的子集，取对应行
+    if full_C is not None and len(full_C) > len(C):
+        raise ValueError("C 应为 full_C 的连续子集，按序取前 N 行")
+    eta = np.zeros(N)
+    for i in range(N):
+        m = mask[i].reshape(K, K)              # 遮挡掩码
+        free = ~m
+        nfree = free.sum()
+        if nfree == 0:
+            continue
+        rows, cols = np.nonzero(free)
+        # 从未遮挡块中随机选，连续坐标
+        bi = rng.integers(0, nfree, n_rays)
+        r1x = rng.random(n_rays)
+        r1y = rng.random(n_rays)
+        bx, by = rows[bi], cols[bi]
+        u = (2 * (bx + 0.5) / K - 1.0) + r1x * (2.0 / K)
+        v = (2 * (by + 0.5) / K - 1.0) + r1y * (2.0 / K)
+        u = np.clip(u, -1, 1)
+        v = np.clip(v, -1, 1)
+        P = (C[i][None, :] + 0.5 * w * u[:, None] * ew[i][None, :]
+             + 0.5 * h * v[:, None] * eh[i][None, :])
+        u1, u2 = cone_basis(r_hat[i])
+        r2 = rng.random(n_rays)
+        r3 = rng.random(n_rays)
+        theta = np.arccos(1.0 - r2 * (1.0 - np.cos(alpha_sun)))
+        phi = 2 * np.pi * r3
+        ct, st = np.cos(theta), np.sin(theta)
+        d = (ct[:, None] * r_hat[i][None, :]
+             + st[:, None] * (np.cos(phi)[:, None] * u1[None, :]
+                              + np.sin(phi)[:, None] * u2[None, :]))
+        hit = ray_hits_collector(P, d, tower_xy)
+        eta[i] = hit.mean()
+    return eta
+
+
+if __name__ == '__main__':
+    import time
+    import pandas as pd
+    from common import solar_position
+
+    df = pd.read_excel(r'D:/pdf/国赛/国赛历年真题/2023年赛题/A题/附件.xlsx')
+    x, y = df['x坐标 (m)'].values, df['y坐标 (m)'].values
+    C = np.column_stack([x, y, np.full(len(x), 4.0)])
+
+    # 性能 + 合理性：夏季正午
+    s, alpha, _, _, _ = solar_position(92.0, 12.0, return_all=True)
+    t0 = time.time()
+    eta = compute_eta_trunc(C, (0, 0), s, 6.0, 6.0, K=6, Nr=2, Nphi=8)
+    t1 = time.time()
+    print(f"N={len(C)} 单时点 K=6 锥内{1+2*8}方向 耗时 {t1-t0:.2f}s")
+    print(f"ηtrunc: mean={eta.mean():.5f} min={eta.min():.5f} "
+          f"[{eta.mean()-eta.std():.4f}, {eta.mean()+eta.std():.4f}]")
+
+    # 蒙特卡洛验证（抽样10镜）
+    print("\n蒙特卡洛交叉验证（抽样10镜, 5000光线/镜）:")
+    idx = np.argsort(eta)[::len(eta)//10][:10]
+    t0 = time.time()
+    mc = eta_trunc_mc(C[idx], (0, 0), s, 6.0, 6.0, n_rays=5000)
+    t1 = time.time()
+    print(f"  MC 耗时 {t1-t0:.1f}s")
+    for i, j in enumerate(idx):
+        print(f"  镜{j:4d}(r={np.hypot(x[j],y[j]):6.1f}m): 确定性={eta[j]:.5f} MC={mc[i]:.5f} "
+              f"Δ={abs(eta[j]-mc[i]):.5f}")
+    diff = np.max(np.abs(eta[idx] - mc))
+    print(f"\n最大差异 Δ={diff:.5f}")
+    assert diff < 0.02, "确定性采样与蒙特卡洛差异过大"
+    assert eta.mean() > 0.9, "截断效率均值异常偏低"
+    print("截断效率测试通过")

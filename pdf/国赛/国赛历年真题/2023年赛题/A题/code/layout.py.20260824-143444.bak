@@ -1,0 +1,74 @@
+# -*- coding: utf-8 -*-
+"""环形布局生成器（问题2/3 共用）。
+
+布局规则：
+  塔在 (x_t, y_t)，环形布局，环中心 = 塔位。
+  约束：镜在半径 350m 场圆内；距塔 > 100m；相邻镜中心距 > max(w,h)+5。
+  径向间距 Δr = dr_factor × (max(w,h)+5)
+  环内弧长间距 Δs = da_factor × (max(w,h)+5)
+"""
+import numpy as np
+
+
+def ring_layout(tower_xy, w, h, h_inst, dr_factor, da_factor,
+                R_field=350.0, R_tower_clear=100.0, max_mirrors=None):
+    """生成环形布局镜中心（含 z=安装高度）。返回 (N,3)。"""
+    xt, yt = tower_xy
+    dmin = max(w, h) + 5.0
+    dr = dr_factor * dmin
+    ds = da_factor * dmin
+    # 第一环半径（塔区外缘 + 半间距）
+    R0 = R_tower_clear + dr * 0.5
+    centers = []
+    k = 0
+    rlim = R_field - np.hypot(w, h) / 2.0
+    # 环半径最大覆盖：场地内任意镜距塔的半径上界（塔在场地内时）
+    R_max = rlim + np.hypot(xt, yt) + dr
+    while True:
+        R = R0 + k * dr
+        if R > R_max:
+            break
+        # 环上镜数：弧长间距 ds 能容纳
+        nk = max(3, int(np.floor(2 * np.pi * R / ds)))
+        # 实际中心距 ≥ ds（可能略小因取整），重算确保 > dmin
+        if 2 * np.pi * R / nk < dmin:
+            nk = int(np.floor(2 * np.pi * R / dmin))
+            if nk < 3:
+                k += 1
+                continue
+        # 相邻环交错半个环距（减少径向遮挡）
+        offset = (np.pi / nk) if (k % 2 == 1) else 0.0
+        angles = np.linspace(0, 2 * np.pi, nk, endpoint=False) + offset
+        for a in angles:
+            cx = xt + R * np.cos(a)
+            cy = yt + R * np.sin(a)
+            # 场边界
+            if np.hypot(cx, cy) <= rlim:
+                centers.append([cx, cy, h_inst])
+        k += 1
+        if max_mirrors is not None and len(centers) >= max_mirrors:
+            break
+    return np.array(centers)
+
+
+def check_constraints(C, w, h, tower_xy, R_field=350.0, R_tower_clear=100.0):
+    """布局约束检查。返回 (是否满足, 违规列表)。"""
+    dmin = max(w, h) + 5.0
+    N = len(C)
+    x, y = C[:, 0], C[:, 1]
+    r = np.hypot(x, y)
+    rt = np.hypot(x - tower_xy[0], y - tower_xy[1])
+    viol = []
+    if np.any(r > R_field - np.hypot(w, h) / 2):
+        viol.append(f'{np.sum(r > R_field - np.hypot(w, h) / 2)} 镜超场界')
+    if np.any(rt <= R_tower_clear):
+        viol.append(f'{np.sum(rt <= R_tower_clear)} 镜在塔区')
+    # 最近邻距离
+    from scipy.spatial import cKDTree
+    if N > 1:
+        tree = cKDTree(np.column_stack([x, y]))
+        dist, _ = tree.query(np.column_stack([x, y]), k=2)
+        nn = dist[:, 1]
+        if np.any(nn < dmin - 1e-6):
+            viol.append(f'{np.sum(nn < dmin - 1e-6)} 对最近邻<{dmin:.1f}m')
+    return len(viol) == 0, viol

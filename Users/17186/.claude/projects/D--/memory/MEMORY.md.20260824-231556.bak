@@ -1,0 +1,8 @@
+# Memory Index
+
+- [pre-edit-backup](pre-edit-backup.md) — 改代码前先备份原文件到 D:\code-backup\ 并推送 git
+- [criterion-gate-multi-compare](criterion-gate-multi-compare.md) — 判据闸门遇抽象层选择默认多方案并行对比而非单选
+- [upper-bound-probe](upper-bound-probe.md) — 优化题标配「低成本上限探查」，跨题共享子解互证，间隙大即触发重优化
+- [background-notify-hooks](background-notify-hooks.md) — 全局通知 hooks：后台 agent 需判断或任务完成时右下角弹窗；含 run_python.ps1 修后台 hooks PowerShell 问题
+- [cleanup-skill](cleanup-skill.md) — cleanup skill：任务完成后先归档 push 到 GitHub claude-backup 再删本地（先传后删）
+
