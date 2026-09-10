@@ -1,0 +1,102 @@
+# -*- coding: utf-8 -*-
+"""随机采样互证图：宽箱 500 点 + 窄箱 300 点 LHS（K12 口径）vs 坐标下降平台与精化脊线。
+数据源：output/q2_lhs.json、output/q2_lhs_narrow.json、output/q2_state.json（同源，不手抄）。"""
+import json
+
+import numpy as np
+
+import figs as fg
+from figs import plt
+
+ROOT = r"D:/z_data/.zcode/workspace/default/2023A"
+PLATEAU_U = 0.5242  # 三轮结构精化平台（K12），见 solving_records/05
+
+
+def load(p):
+    with open(p, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def arr(recs):
+    ok = [r for r in recs if "E" in r]
+    E = np.array([r["E"] for r in ok])
+    u = np.array([r["u"] for r in ok])
+    feas = np.array([bool(r["feasible"]) for r in ok])
+    return E, u, feas
+
+
+def best_of_n(recs):
+    best = -np.inf
+    out = []
+    for r in recs:
+        if r.get("feasible"):
+            best = max(best, r["u"])
+        out.append(best)
+    return np.array(out)
+
+
+def main():
+    wide = load(f"{ROOT}/output/q2_lhs.json")["recs"]
+    narrow = load(f"{ROOT}/output/q2_lhs_narrow.json")["recs"]
+    st = load(f"{ROOT}/output/q2_state.json")
+    rb = st["refine_best"]  # K12 口径精化收敛点
+
+    Ew, uw, fw = arr(wide)
+    En, un, fn = arr(narrow)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.3))
+
+    # 左：E–u 散点
+    ax1.scatter(Ew[~fw], uw[~fw], s=10, facecolors="none", edgecolors="0.6", linewidths=0.6,
+                label="宽箱采样·不可行（E<60）")
+    ax1.scatter(Ew[fw], uw[fw], s=14, color="0.35", label="宽箱采样·可行")
+    ax1.scatter(En[~fn], un[~fn], s=10, facecolors="none", edgecolors="tab:blue", linewidths=0.6,
+                label="窄箱采样·不可行")
+    ax1.scatter(En[fn], un[fn], s=14, color="tab:blue", label="窄箱采样·可行")
+    ax1.axvline(60.0, color="tab:red", ls="--", lw=1.0)
+    ax1.axhline(PLATEAU_U, color="tab:green", ls=":", lw=1.0)
+    ax1.scatter([rb["E"]], [rb["u"]], marker="*", s=180, color="tab:red", zorder=5,
+                label="精化脊线 u*=%.4f" % rb["u"])
+    x0, x1 = ax1.get_xlim()
+    y0, y1 = ax1.get_ylim()
+    ax1.text(60.0 + 0.01 * (x1 - x0), y0 + 0.03 * (y1 - y0), "额定 60 MW", color="tab:red", fontsize=9)
+    ax1.text(x0 + 0.02 * (x1 - x0), PLATEAU_U + 0.012 * (y1 - y0), "坐标下降平台 u=%.4f" % PLATEAU_U,
+             color="tab:green", fontsize=9)
+    ax1.set_xlabel("年平均输出热功率 E / MW")
+    ax1.set_ylabel("单位镜面面积年平均输出热功率 u / (kW/m$^2$)")
+    ax1.set_title("(a) 随机采样在 E–u 平面的分布（K=12 口径）")
+    ax1.grid(alpha=0.3)
+    ax1.legend(fontsize=8, loc="lower left")
+
+    # 右：best-of-N
+    bw = best_of_n(wide)
+    bn = best_of_n(narrow)
+    ax2.plot(np.arange(1, len(bw) + 1), bw, color="0.35", lw=1.5, label="宽箱 LHS（5 维，%d 点）" % len(bw))
+    ax2.plot(np.arange(1, len(bn) + 1), bn, color="tab:blue", lw=1.5, label="窄箱 LHS（3 维，%d 点）" % len(bn))
+    ax2.axhline(rb["u"], color="tab:red", ls="--", lw=1.0, label="精化脊线 u*=%.4f" % rb["u"])
+    ax2.axhline(PLATEAU_U, color="tab:green", ls=":", lw=1.0, label="坐标下降平台 u=%.4f" % PLATEAU_U)
+    fin_w = np.nanmax(np.where(np.isfinite(bw), bw, np.nan))
+    fin_n = np.nanmax(np.where(np.isfinite(bn), bn, np.nan))
+    ax2.annotate("宽箱最优 %.4f" % fin_w, xy=(len(bw), fin_w), xytext=(-90, -18),
+                 textcoords="offset points", fontsize=8, color="0.35",
+                 arrowprops=dict(arrowstyle="-", color="0.5", lw=0.6))
+    ax2.annotate("窄箱最优 %.4f" % fin_n, xy=(len(bn), fin_n), xytext=(-90, 12),
+                 textcoords="offset points", fontsize=8, color="tab:blue",
+                 arrowprops=dict(arrowstyle="-", color="tab:blue", lw=0.6))
+    ax2.set_xlabel("采样点数 N")
+    ax2.set_ylabel("可行样本中的最优 u / (kW/m$^2$)")
+    ax2.set_title("(b) 可行样本最优值随采样数的变化")
+    ax2.set_xscale("log")
+    lo = min(np.nanmin(np.where(np.isfinite(bw), bw, np.nan)), np.nanmin(np.where(np.isfinite(bn), bn, np.nan)))
+    ax2.set_ylim(lo - 0.003, rb["u"] + 0.004)
+    ax2.grid(alpha=0.3, which="both")
+    ax2.legend(fontsize=8, loc="lower right")
+
+    fig.tight_layout()
+    fg.save(fig, "q2_lhs_probe.png")
+    print("saved q2_lhs_probe.png | wide best %.6f (%d feas/%d) | narrow best %.6f (%d feas/%d) | ridge %.6f"
+          % (fin_w, fw.sum(), len(fw), fin_n, fn.sum(), len(fn), rb["u"]))
+
+
+if __name__ == "__main__":
+    main()

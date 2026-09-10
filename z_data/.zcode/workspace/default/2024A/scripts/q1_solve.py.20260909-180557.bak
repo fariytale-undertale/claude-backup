@@ -1,0 +1,135 @@
+# -*- coding: utf-8 -*-
+"""问题1：0-300 s 每秒全队 224 把手位置与速度。
+产出：output/result1.xlsx、output/tables/q1_paper_tables.xlsx、figures/fig_q1_*.png。
+所有报告数字来自本脚本 print。"""
+import numpy as np
+import openpyxl
+import os, re, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dragon_core import (Spiral, ReversedPath, walk_chain, chain_points,
+                         chain_speeds, chord_residual, min_bench_distance,
+                         S_arc, spiral_point)
+from figures_common import save_fig, draw_spiral, COLORS
+import matplotlib.pyplot as plt
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ATT = "D:/pdf/国赛/国赛历年真题/2024年赛题/A题/附件"
+
+t_start = time.time()
+P_PITCH = 0.55
+sp = Spiral(P_PITCH)
+rp = ReversedPath(sp)
+b = sp.b
+S_A = float(S_arc(32 * np.pi, b))
+
+# ---------- 求解：批量 301 个时刻 ----------
+ts = np.arange(0, 301, dtype=float)
+mu_head = ts - S_A                       # mu = -s，行进方向递增；头部 mu = -(S_A - t)
+mu = walk_chain(rp, mu_head)             # (301, 224)
+X = chain_points(rp, mu)                 # (301, 224, 2)
+sdot = chain_speeds(rp, mu, 1.0)         # (301, 224)
+speeds = np.abs(sdot)
+
+# ---------- 检验 ----------
+res = chord_residual(rp, mu)
+print(f"[检验] 全部弦长残差 max = {res:.3e} m")
+assert res < 1e-8
+print(f"[检验] 龙头速度范围 = [{speeds[:,0].min():.12f}, {speeds[:,0].max():.12f}] (应为1)")
+assert abs(speeds[:, 0] - 1.0).max() < 1e-12
+# 手验：t=0 龙头位于 A=(8.8,0)
+print(f"[检验] t=0 龙头位置 = ({X[0,0,0]:.9f}, {X[0,0,1]:.9f}) (应为 (8.8, 0))")
+assert abs(X[0, 0, 0] - 8.8) < 1e-9 and abs(X[0, 0, 1]) < 1e-9
+# P3 命题：速率从龙头(内端)向龙尾(外端)单调递减
+mono_viol = np.max(np.diff(speeds, axis=1))
+print(f"[命题P3] 速率沿链单调性: max(后把手-前把手) = {mono_viol:.3e} (<=0 则全程单调递减)")
+# 差分互证（t=0,150,300）
+h = 1e-5
+for t_chk in (0.0, 150.0, 300.0):
+    Xp = chain_points(rp, walk_chain(rp, np.array([t_chk + h - S_A])))[0]
+    Xm = chain_points(rp, walk_chain(rp, np.array([t_chk - h - S_A])))[0]
+    v_fd = np.linalg.norm(Xp - Xm, axis=1) / (2 * h)
+    rel = np.abs(speeds[int(t_chk)] - v_fd) / v_fd
+    print(f"[检验] t={t_chk:.0f}s 递推vs中心差分 max rel err = {rel.max():.2e}")
+    assert rel.max() < 1e-5
+# 位置 t=300 龙头半径 sanity
+print(f"[检验] t=300 龙头半径 = {np.linalg.norm(X[300,0]):.6f} m (gate_sanity: 4.9923)")
+assert abs(np.linalg.norm(X[300, 0]) - 4.9923) < 1e-3
+
+# ---------- 碰撞前提核验（全程 D(t)>0） ----------
+print("[检验] 计算 0-300 s 全程最小板凳间距（主判据）...")
+D_list = np.empty(301)
+for i, t in enumerate(ts):
+    P = X[i]
+    d, pair, ncand = min_bench_distance(P)
+    D_list[i] = d
+print(f"[检验] 0-300s D(t) 最小值 = {D_list.min():.6f} m @ t={ts[int(np.argmin(D_list))]:.0f}s "
+      f"(>0 => 问题1全程无碰撞前提成立)")
+assert D_list.min() > 0
+
+# ---------- 填写 result1.xlsx ----------
+import result_io
+time_headers = list(range(0, 301))
+result_io.fill_posvel(f"{ATT}/result1.xlsx", f"{ROOT}/output/result1.xlsx",
+                      {t: X[t] for t in time_headers},
+                      {t: speeds[t] for t in time_headers}, time_headers)
+print("saved:", f"{ROOT}/output/result1.xlsx")
+
+# ---------- 论文表1/表2 ----------
+paper_rows = [("龙头", 0), ("第1节龙身", 1), ("第51节龙身", 51), ("第101节龙身", 101),
+              ("第151节龙身", 151), ("第201节龙身", 201), ("龙尾（后）", 223)]
+paper_ts = [0, 60, 120, 180, 240, 300]
+os.makedirs(f"{ROOT}/output/tables", exist_ok=True)
+wb_out = openpyxl.Workbook()
+ws1 = wb_out.active; ws1.title = "表1位置"
+ws1.append([""] + [f"{t} s" for t in paper_ts])
+for name, k in paper_rows:
+    ws1.append([f"{name}x (m)"] + [round(float(X[t, k, 0]), 6) for t in paper_ts])
+    ws1.append([f"{name}y (m)"] + [round(float(X[t, k, 1]), 6) for t in paper_ts])
+ws2 = wb_out.create_sheet("表2速度")
+ws2.append([""] + [f"{t} s" for t in paper_ts])
+for name, k in paper_rows:
+    ws2.append([f"{name} (m/s)"] + [round(float(speeds[t, k]), 6) for t in paper_ts])
+wb_out.save(f"{ROOT}/output/tables/q1_paper_tables.xlsx")
+print("saved:", f"{ROOT}/output/tables/q1_paper_tables.xlsx")
+print("\n== 表1 位置 (m) ==")
+print("       " + "".join(f"{t:>13}" for t in paper_ts))
+for name, k in paper_rows:
+    print(f"{name+'x':>10} " + "".join(f"{X[t,k,0]:>13.6f}" for t in paper_ts))
+    print(f"{name+'y':>10} " + "".join(f"{X[t,k,1]:>13.6f}" for t in paper_ts))
+print("\n== 表2 速度 (m/s) ==")
+for name, k in paper_rows:
+    print(f"{name:>10} " + "".join(f"{speeds[t,k]:>13.6f}" for t in paper_ts))
+
+# ---------- 图 ----------
+# 图1 轨迹快照
+fig, ax = plt.subplots(figsize=(7.2, 7.2))
+draw_spiral(ax, P_PITCH, 130.0, color="0.85", lw=0.6, zorder=1)
+for t, c in zip([0, 100, 200, 300], COLORS):
+    ax.plot(X[t, :, 0], X[t, :, 1], ".", ms=2.5, color=c, label=f"t={t} s", zorder=3)
+ax.plot(0, 0, "k+", ms=10, zorder=4)
+ax.plot([8.8], [0], "k*", ms=9, zorder=4)
+ax.annotate("A (8.8, 0)", (8.8, 0), textcoords="offset points", xytext=(6, 6), fontsize=9)
+ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
+ax.set_aspect("equal")
+ax.set_title("问题1：舞龙队位形快照（灰线为螺距0.55 m盘入螺线）")
+ax.legend(loc="upper left", fontsize=9)
+save_fig(fig, "fig_q1_traj.png")
+
+# 图2 速度分布与时间演化
+fig, (axa, axb) = plt.subplots(1, 2, figsize=(11.5, 4.4))
+for t, c in zip([0, 100, 200, 300], COLORS):
+    axa.plot(np.arange(224), speeds[t], lw=1.1, color=c, label=f"t={t} s")
+axa.set_xlabel("把手编号（0=龙头前把手，223=龙尾后把手）")
+axa.set_ylabel("速度 (m/s)")
+axa.set_title("速度沿链分布")
+axa.legend(fontsize=9)
+sel = [0, 1, 51, 101, 151, 201, 223]
+for k, c in zip(sel, COLORS):
+    axb.plot(ts, speeds[:, k], lw=1.0, color=c, label=f"把手{k}")
+axb.set_xlabel("t (s)"); axb.set_ylabel("速度 (m/s)")
+axb.set_title("指定把手速度的时间演化")
+axb.legend(fontsize=8, ncol=2)
+fig.tight_layout()
+save_fig(fig, "fig_q1_speed.png")
+
+print(f"\n[运行时间] 问题1 总耗时 {time.time()-t_start:.1f} s")

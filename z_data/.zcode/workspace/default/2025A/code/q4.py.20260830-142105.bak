@@ -1,0 +1,265 @@
+# -*- coding: utf-8 -*-
+"""问题4：FY1/FY2/FY3 各投 1 弹对 M1，最大化三弹并集遮蔽时长（12 维，跨机可分离+并集耦合）。
+结构热起点含手算几何走廊：FY2 南向走廊(t_b≈9.5)、FY3 近目标后段窗口(t_b≈38)。"""
+import numpy as np
+import time
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import (UAVS, target_samples, T_FUSE_MIN, T_END, MISSILES,
+                    shading_intervals, union_length, burst_point)
+from solver import tau_of, nelder_mead
+import plotstyle as ps
+ps.set_figdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'output', 'figures'))
+import matplotlib.pyplot as plt
+
+T0 = time.time()
+SAMPLES = target_samples()
+SAMPLES_V = target_samples(48, 4)
+UAV_NAMES = ['FY1', 'FY2', 'FY3']
+
+def tau_union(bomb_list, dt=0.05, samples=SAMPLES):
+    """bomb_list: [(uav_name, hd, sp, td, tf)] → 并集时长。"""
+    return tau_of([(UAVS[n], hd, sp, td, tf) for n, hd, sp, td, tf in bomb_list],
+                  dt=dt, samples=samples)
+
+# ================= 阶段A：G3 逐机全航向粗扫 =================
+tA = time.time()
+scan_starts = {}
+n_eval = 0
+for name in UAV_NAMES:
+    u0 = UAVS[name]
+    cells = []
+    for hd in np.arange(0.0, 360.0, 12.0):
+        for sp in (70.0, 105.0, 140.0):
+            for td in (0.0, 4.0, 8.0, 12.0, 16.0, 20.0, 24.0):
+                for tf in (1.0, 3.0, 5.7, 8.0, 10.4, 13.0, 16.0):
+                    tau = tau_of([(u0, hd, sp, td, tf)], dt=0.1, samples=SAMPLES)
+                    n_eval += 1
+                    cells.append((tau, hd, sp, td, tf))
+    cells.sort(key=lambda r: -r[0])
+    scan_starts[name] = cells
+t_scan = time.time() - tA
+print(f"[阶段A G3粗扫] 3机×{len(scan_starts['FY1'])}格={n_eval}次 耗时{t_scan:.1f}s")
+for name in UAV_NAMES:
+    tau, hd, sp, td, tf = scan_starts[name][0]
+    print(f"  {name} 粗扫最优: τ={tau:.3f}s  hd={hd:.0f}° v={sp:.0f} td={td:.0f} tf={tf}")
+
+# ================= 阶段B：逐机多起点 NM（个体最优）+ 结构热起点 =================
+tB = time.time()
+STRUCT = {   # 手算几何走廊起点（建模机理见解题记录）
+    'FY1': [(179.4, 125.0, 0.35, 3.77), (7.8, 70.0, 0.03, 1.0)],
+    'FY2': [(270.0, 140.0, 3.1, 6.4)],
+    'FY3': [(143.7, 139.0, 28.0, 10.4)],
+}
+def y_of(hd, sp, td, tf):
+    return np.array([hd, np.log(max(sp - 70, 1e-6) / max(140 - sp, 1e-6)),
+                     np.sqrt(max(td, 0.05)), np.sqrt(max(tf - T_FUSE_MIN, 0.05))])
+def bomb_of(name, y):
+    hd = y[0] % 360.0
+    sp = 70.0 + 70.0 / (1.0 + np.exp(-y[1]))
+    td = y[2] ** 2
+    tf = T_FUSE_MIN + y[3] ** 2
+    return (name, hd, sp, td, tf)
+
+indiv = {}
+for name in UAV_NAMES:
+    u0 = UAVS[name]
+    starts = []
+    for tau, hd, sp, td, tf in scan_starts[name][:2]:
+        starts.append(y_of(hd, sp, td, tf))
+    for hd, sp, td, tf in STRUCT[name]:
+        starts.append(y_of(hd, sp, td, tf))
+    def neg_single(y, _name=name):
+        b = bomb_of(_name, y)
+        return -tau_of([(UAVS[_name], b[1], b[2], b[3], b[4])], dt=0.05, samples=SAMPLES)
+    best = None
+    for y0 in starts:
+        xb, fb, _, hist = nelder_mead(neg_single, y0, max_iter=500)
+        if best is None or fb < best[1]:
+            best = (xb, fb, hist)
+    indiv[name] = bomb_of(name, best[0])
+    b = indiv[name]
+    print(f"  {name} 个体最优: τ={-best[1]:.3f}s  hd={b[1]:.2f}° v={b[2]:.1f} td={b[3]:.3f} tf={b[4]:.3f}")
+t_indiv = time.time() - tB
+sol = [(n, indiv[n][1], indiv[n][2], indiv[n][3], indiv[n][4]) for n in UAV_NAMES]
+print(f"  三弹并集(初始) τ = {tau_union(sol):.3f}s")
+
+# ================= 阶段C：坐标上升（并集目标，2轮×3机）=================
+tC = time.time()
+hist_track = [tau_union(sol)]
+for sweep in range(2):
+    for i, name in enumerate(UAV_NAMES):
+        others = [b for j, b in enumerate(sol) if j != i]
+        def neg_union(y, _others=others, _name=name):
+            b = bomb_of(_name, y)
+            return -tau_of([(UAVS[_others_k[0]], _b[1], _b[2], _b[3], _b[4]) for _others_k, _b in []] or
+                           [(UAVS[o[0]], o[1], o[2], o[3], o[4]) for o in _others] +
+                           [(UAVS[_name], b[1], b[2], b[3], b[4])], dt=0.05, samples=SAMPLES)
+        y0 = y_of(sol[i][1], sol[i][2], sol[i][3], sol[i][4])
+        step = 0.25 if sweep == 0 else 0.08
+        xb, fb, _, _ = nelder_mead(neg_union, y0, max_iter=500, step=step)
+        sol[i] = bomb_of(name, xb)
+        hist_track.append(-fb)
+t_ca = time.time() - tC
+for name, hd, sp, td, tf in sol:
+    print(f"  {name}: hd={hd:.3f}° v={sp:.2f} td={td:.4f} tf={tf:.4f}")
+print(f"  坐标上升后并集 τ = {tau_union(sol):.4f}s（耗时{t_ca:.1f}s）")
+
+# ================= 阶段D：独立验证 =================
+tD = time.time()
+alliv = []
+info = []
+for name, hd, sp, td, tf in sol:
+    iv, B, tb = shading_intervals(UAVS[name], hd, sp, td, tf, 'M1', dt=0.02, samples=SAMPLES_V, criterion='body')
+    alliv += iv
+    info.append((name, hd, sp, td, tf, B, tb, union_length(iv), iv))
+tau_ref = union_length(alliv)
+print(f"\n[阶段D 独立验证] dt=0.02/192点/二分: 并集 τ = {tau_ref:.6f}s")
+for name, hd, sp, td, tf, B, tb, du, iv in info:
+    print(f"  {name}: 遮蔽{du:.4f}s 区间={[(round(a,4),round(b,4)) for a,b in iv]}")
+t_val = time.time() - tD
+
+# G5 边界哨兵
+flags = []
+for name, hd, sp, td, tf, *_ in info:
+    if abs(sp - 70) < 1e-3 or abs(sp - 140) < 1e-3: flags.append(f"{name} v贴界")
+    if tf - T_FUSE_MIN < 1e-3: flags.append(f"{name} tf贴引信下界")
+    if td < 1e-3: flags.append(f"{name} td贴0")
+print(f"[G5 边界哨兵] " + ("⚠ " + "; ".join(flags) if flags else "无参数贴边"))
+
+# G6
+print(f"[G6 外部基准] AGENTS.md 记录 Q4≈11.735s → 本解 τ={tau_ref:.3f}s, 差异={(tau_ref-11.735)/11.735*100:+.2f}%")
+
+# ================= 阶段E：G8 灵敏度（±10% 参数，1轮坐标上升重优化）=================
+tE = time.time()
+print("\n[阶段E G8 灵敏度]")
+import common as C
+import solver as S2
+RB, SB = C.R_CLOUD, C.V_SINK
+for pname, key, val, lab in (('R', 'R', 9.0, '-10%'), ('R', 'R', 11.0, '+10%'),
+                             ('V_sink', 'S', 2.7, '-10%'), ('V_sink', 'S', 3.3, '+10%')):
+    if key == 'R':
+        C.R_CLOUD = val; S2.R_CLOUD = val
+    else:
+        C.V_SINK = val; S2.V_SINK = val
+    sol2 = [tuple(b) for b in sol]
+    for i, name in enumerate(UAV_NAMES):
+        others = [b for j, b in enumerate(sol2) if j != i]
+        def neg_u(y, _others=others, _name=name):
+            b = bomb_of(_name, y)
+            return -tau_of([(UAVS[o[0]], o[1], o[2], o[3], o[4]) for o in _others] +
+                           [(UAVS[_name], b[1], b[2], b[3], b[4])], dt=0.05, samples=SAMPLES)
+        y0 = y_of(sol2[i][1], sol2[i][2], sol2[i][3], sol2[i][4])
+        xb2, fb2, _, _ = nelder_mead(neg_u, y0, max_iter=250, step=0.06)
+        sol2[i] = bomb_of(name, xb2)
+    tau2 = tau_of([(UAVS[b[0]], b[1], b[2], b[3], b[4]) for b in sol2], dt=0.02, samples=SAMPLES_V)
+    C.R_CLOUD, S2.R_CLOUD = RB, RB
+    C.V_SINK, S2.V_SINK = SB, SB
+    flips = sum(1 for a, b2 in zip(sol, sol2) if abs(a[1] - b2[1]) > 5 or abs(a[2] - b2[2]) > 10)
+    print(f"  {pname}{lab}({val}): 重优化并集 τ={tau2:.3f}s  决策偏移机数={flips}/3")
+t_sens = time.time() - tE
+
+# ================= 图表 =================
+fig = plt.figure(figsize=(10, 8)); ax = fig.add_subplot(111, projection='3d')
+mdir = -MISSILES['M1'] / np.linalg.norm(MISSILES['M1'])
+tg_m = np.linspace(0, T_END['M1'], 200)
+mp = MISSILES['M1'][None, :] + 300 * tg_m[:, None] * mdir[None, :]
+ax.plot(mp[:, 0], mp[:, 1], mp[:, 2], 'r-', lw=2, label='M1弹道')
+cols = ['green', 'darkgreen', 'lime']
+phi, th_g = np.mgrid[0:np.pi:12j, 0:2 * np.pi:18j]
+for k, (name, hd, sp, td, tf, B, tb, du, iv) in enumerate(info):
+    th = np.deg2rad(hd)
+    tg_u = np.linspace(0, td + tf, 40)
+    up = UAVS[name][None, :] + sp * tg_u[:, None] * np.array([np.cos(th), np.sin(th), 0.0])[None, :]
+    up[:, 2] = UAVS[name][2]
+    ax.plot(up[:, 0], up[:, 1], up[:, 2], color=cols[k], lw=1.8, label=f'{name}航迹')
+    tg_b = np.linspace(td, td + tf, 30)
+    bp = UAVS[name][None, :] + sp * tg_b[:, None] * np.array([np.cos(th), np.sin(th), 0.0])[None, :]
+    bp[:, 2] -= 0.5 * 9.8 * (tg_b - td) ** 2
+    ax.plot(bp[:, 0], bp[:, 1], bp[:, 2], color='orange', lw=1.2)
+    ax.scatter(*B, color='orange', marker='*', s=90)
+    if iv:
+        tt = 0.5 * (iv[0][0] + iv[-1][1])
+        cc = np.array(B) - np.array([0, 0, 3.0 * (tt - tb)])
+        ax.plot_surface(cc[0] + 10 * np.sin(phi) * np.cos(th_g), cc[1] + 10 * np.sin(phi) * np.sin(th_g),
+                        cc[2] + 10 * np.cos(phi), alpha=0.15, color='royalblue')
+ax.scatter(0, 0, 0, color='k', marker='s', s=60, label='假目标')
+TH_, ZZ_ = np.meshgrid(np.linspace(0, 2 * np.pi, 40), np.linspace(0, 10, 3))
+ax.plot_surface(7 * np.cos(TH_), 200 + 7 * np.sin(TH_), ZZ_, alpha=0.5, color='slategray')
+ax.set_xlabel('x / m'); ax.set_ylabel('y / m'); ax.set_zlabel('z / m'); ps.equal3d(ax)
+ax.set_title(f'问题4最优策略 3D 场景（三机并集 τ={tau_ref:.3f}s）')
+ax.legend(loc='upper left', fontsize=8)
+ps.save(fig, 'q4_traj_3d.png')
+
+fig, ax = plt.subplots(figsize=(9, 4))
+for k, (name, hd, sp, td, tf, B, tb, du, iv) in enumerate(info):
+    for a, b in iv:
+        ax.barh(2 - k, b - a, left=a, height=0.4, color=cols[k], alpha=0.8)
+uni = []
+for a, b in sorted(alliv):
+    if uni and a <= uni[-1][1]:
+        uni[-1][1] = max(uni[-1][1], b)
+    else:
+        uni.append([a, b])
+for a, b in uni:
+    ax.barh(-0.8, b - a, left=a, height=0.35, color='steelblue')
+    ax.text((a + b) / 2, -0.8, f'{b - a:.2f}', ha='center', va='center', color='w', fontsize=9)
+ax.set_yticks([-0.8, 0, 1, 2])
+ax.set_yticklabels([f'并集 τ={tau_ref:.2f}s'] + [n for n, *_ in info])
+ax.set_xlabel('时间 t / s')
+ax.set_title('问题4：各机遮蔽区间与并集')
+ps.save(fig, 'q4_interval.png')
+
+fig, ax = plt.subplots(figsize=(6, 3.8))
+dus = [du for *_x, du, iv in info]
+bars = ax.bar([n for n, *_ in info] + ['并集'], dus + [tau_ref], color=cols + ['crimson'], width=0.5)
+for b_, v in zip(bars, dus + [tau_ref]):
+    ax.text(b_.get_x() + b_.get_width() / 2, v + 0.08, f'{v:.2f}', ha='center', fontsize=10)
+ax.set_ylabel('有效遮蔽时长 / s')
+ax.set_title('问题4：各机单独遮蔽与并集')
+ps.save(fig, 'q4_contrib.png')
+
+fig, ax = plt.subplots(figsize=(7, 4))
+ax.plot(range(len(hist_track)), hist_track, lw=1.5, color='crimson', marker='.', ms=4)
+ax.set_xlabel('坐标上升轮次（逐机）'); ax.set_ylabel('当前并集 τ / s')
+ax.set_title('问题4：坐标上升收敛过程')
+ps.save(fig, 'q4_converge.png')
+
+# ================= result2.xlsx =================
+import openpyxl
+src = r"D:/pdf/国赛/国赛历年真题/2025年赛题/A题/附件/result2.xlsx"
+wb = openpyxl.load_workbook(src)
+ws = wb.active
+for k, (name, hd, sp, td, tf, B, tb, du, iv) in enumerate(info):
+    r = 2 + k
+    th = np.deg2rad(hd)
+    Pd = UAVS[name] + sp * td * np.array([np.cos(th), np.sin(th), 0.0])
+    ws.cell(row=r, column=1, value=name)
+    ws.cell(row=r, column=2, value=round(hd, 2))
+    ws.cell(row=r, column=3, value=round(sp, 2))
+    ws.cell(row=r, column=4, value=round(Pd[0], 2))
+    ws.cell(row=r, column=5, value=round(Pd[1], 2))
+    ws.cell(row=r, column=6, value=round(Pd[2], 2))
+    ws.cell(row=r, column=7, value=round(B[0], 2))
+    ws.cell(row=r, column=8, value=round(B[1], 2))
+    ws.cell(row=r, column=9, value=round(B[2], 2))
+    ws.cell(row=r, column=10, value=round(du, 3))
+out = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'results', 'result2.xlsx')
+wb.save(out)
+print(f"\n[result2.xlsx 已生成] {out}")
+
+tabs = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'output', 'tables')
+with open(os.path.join(tabs, 'q4_result.md'), 'w', encoding='utf-8') as f:
+    f.write("# 问题4 结果\n\n| 量 | 数值 |\n|---|---|\n")
+    for name, hd, sp, td, tf, B, tb, du, iv in info:
+        th = np.deg2rad(hd)
+        Pd = UAVS[name] + sp * td * np.array([np.cos(th), np.sin(th), 0.0])
+        f.write(f"| {name} 航向/速度 | {hd:.4f}° / {sp:.4f} m/s |\n")
+        f.write(f"| {name} 投放时刻/起爆时刻 (s) | {td:.4f} / {tb:.4f} |\n")
+        f.write(f"| {name} 投放点 (m) | ({Pd[0]:.2f}, {Pd[1]:.2f}, {Pd[2]:.2f}) |\n")
+        f.write(f"| {name} 起爆点 (m) | ({B[0]:.2f}, {B[1]:.2f}, {B[2]:.2f}) |\n")
+        f.write(f"| {name} 单独遮蔽时长 (s) | {du:.4f} |\n")
+    f.write(f"| **三弹并集有效遮蔽时长 (s)** | **{tau_ref:.3f}** |\n")
+    f.write(f"| G6 外部基准 (s) | 11.735（差异 {(tau_ref-11.735)/11.735*100:+.2f}%） |\n")
+
+print(f"[计时] 粗扫{t_scan:.1f}s + 个体NM{t_indiv:.1f}s + 坐标上升{t_ca:.1f}s + 验证{t_val:.1f}s + G8{t_sens:.1f}s = 总 {time.time() - T0:.1f}s")

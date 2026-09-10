@@ -1,0 +1,101 @@
+%% pi_mc.m —— 用两种蒙特卡洛仿真思想计算 Pi
+% 思想一（随机投点 / 频率法）：
+%   在 [-1,1]x[-1,1] 正方形内均匀撒 n 个点，落入单位圆的频率 m/n
+%   收敛于概率 P(落在圆内) = pi/4，故 pi ≈ 4*m/n，误差 O(n^{-1/2})。
+% 思想二（均值法 / 积分估计）：
+%   四分之一单位圆面积 = ∫_0^1 sqrt(1-x^2) dx = pi/4，
+%   用样本均值 mean(sqrt(1-x^2)) 估计该积分，故 pi ≈ 4*mean(...)。
+% 随机数均由 rand 产生 (0,1) 均匀分布；运行结束打印结果并保存 3 张图。
+
+clear; clc; close all;
+rng(2026);                        % 固定种子便于复现；删除本行则每次结果不同
+
+%% ============ 方法一：随机投点法（频率思想）============
+n = 1e6;
+xy = 2*rand(n,2) - 1;             % 均匀撒入 [-1,1]^2
+inside = sum(xy(:,1).^2 + xy(:,2).^2 <= 1);   % 落入单位圆的点数 m
+pi_drop = 4*inside/n;
+
+%% ============ 方法二：均值法（积分/期望思想）============
+x = rand(n,1);                    % x ~ U(0,1)
+pi_mean = 4*mean(sqrt(1 - x.^2)); % 样本均值估计定积分, 乘 4 还原 pi
+
+fprintf('================ 单次大样本估计 (n = %d) ================\n', n);
+fprintf('真值            pi = %.6f\n', pi);
+fprintf('投点法  4*m/n   = %.6f   绝对误差 %.2e\n', pi_drop, abs(pi_drop-pi));
+fprintf('均值法  4*mean  = %.6f   绝对误差 %.2e\n', pi_mean, abs(pi_mean-pi));
+
+%% ============ 图1：投点法示意图（对应课件插图）============
+figure('Color','w','Position',[80 80 980 430]);
+m0 = 500; xy0 = 2*rand(m0,2)-1;
+in0 = xy0(:,1).^2 + xy0(:,2).^2 <= 1;
+
+subplot(1,2,1);                   % 左：正方形内撒点
+plot(xy0(:,1), xy0(:,2), 'r.'); hold on;
+axis([-1 1 -1 1] * 1.15); axis square; grid on;
+xlabel('x'); ylabel('y');
+title(sprintf('正方形内均匀撒点  n = %d', m0));
+legend('随机点','Location','southeast');
+
+subplot(1,2,2);                   % 右：标出落入单位圆内的点
+th = linspace(0, 2*pi, 361);
+fill(cos(th), sin(th), [0.72 0.88 0.72], 'EdgeColor','k'); hold on;
+plot(xy0(in0,1), xy0(in0,2), 'b.', xy0(~in0,1), xy0(~in0,2), 'r.');
+axis([-1 1 -1 1] * 1.15); axis square; grid on;
+xlabel('x'); ylabel('y');
+title(sprintf('落入圆内 m = %d 个,  \\pi \\approx 4m/n = %.4f', sum(in0), 4*sum(in0)/m0));
+legend('单位圆','圆内','圆外','Location','southeast');
+exportgraphics(gcf, 'fig1_drop.png', 'Resolution', 200);
+
+%% ============ 图2：误差收敛曲线（验证 O(n^{-1/2})）============
+ns = unique(round(logspace(1,6,20)));
+err1 = zeros(size(ns)); err2 = zeros(size(ns));
+for k = 1:numel(ns)
+    xyk = 2*rand(ns(k),2)-1;
+    err1(k) = abs(4*mean(sum(xyk.^2,2) <= 1) - pi);   % 投点法误差
+    xk = rand(ns(k),1);
+    err2(k) = abs(4*mean(sqrt(1-xk.^2)) - pi);        % 均值法误差
+end
+
+figure('Color','w','Position',[100 100 640 480]);
+loglog(ns, err1, 'o-', 'LineWidth',1.2); hold on;
+loglog(ns, err2, 's-', 'LineWidth',1.2);
+loglog(ns, 1.64./sqrt(ns), 'k--');    % 投点法理论标准差参考线
+loglog(ns, 0.89./sqrt(ns), 'k:');     % 均值法 理论标准差参考线
+grid on;
+xlabel('样本数 n (对数轴)'); ylabel('|估计值 - \pi| (对数轴)');
+title('两种仿真思想的误差均按 O(n^{-1/2}) 收敛');
+legend('投点法','均值法','理论散布 1.64/\surd n','理论散布 0.89/\surd n', 'Location','southwest');
+exportgraphics(gcf, 'fig2_converge.png', 'Resolution', 200);
+
+% 对数坐标下直线斜率应约为 -1/2
+p1 = polyfit(log(ns), log(err1), 1);
+p2 = polyfit(log(ns), log(err2), 1);
+fprintf('---------------- 收敛阶检验（log-log 斜率，理论 -0.5）----\n');
+fprintf('投点法斜率 = %.3f ,  均值法斜率 = %.3f\n', p1(1), p2(1));
+
+%% ============ 图3：重复实验分布（两种思想的方差对比）============
+nrep = 500; m = 1e4;
+pi1 = zeros(nrep,1); pi2 = zeros(nrep,1);
+for r = 1:nrep
+    xy = 2*rand(m,2)-1;
+    pi1(r) = 4*mean(sum(xy.^2,2) <= 1);
+    x = rand(m,1);
+    pi2(r) = 4*mean(sqrt(1-x.^2));
+end
+
+figure('Color','w','Position',[120 120 640 480]);
+histogram(pi1, 40, 'FaceAlpha',0.55); hold on;
+histogram(pi2, 40, 'FaceAlpha',0.55);
+xline(pi, 'k--', 'LineWidth', 1.5);
+grid on;
+xlabel('\pi 的估计值'); ylabel('频数');
+title(sprintf('%d 次重复实验 (每次 n = %d)：均值法散布更小', nrep, m));
+legend('投点法','均值法','真值 \pi');
+exportgraphics(gcf, 'fig3_hist.png', 'Resolution', 200);
+
+fprintf('---------------- 重复实验方差对比 ------------------------\n');
+fprintf('标准差: 投点法 %.5f | 均值法 %.5f | 比值 %.2f\n', ...
+        std(pi1), std(pi2), std(pi1)/std(pi2));
+fprintf('(投点法每次实验只区分“圆内/圆外”, 损失信息更多, 故方差约为均值法的 %.1f 倍)\n', ...
+        (std(pi1)/std(pi2))^2);

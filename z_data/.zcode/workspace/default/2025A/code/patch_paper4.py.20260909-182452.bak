@@ -1,0 +1,86 @@
+# -*- coding: utf-8 -*-
+"""论文 P1 修复补丁：表3/6.4 新解统一、摘要尾数、Q2 灵敏度表、Q4 灵敏度表、文献引用与扩充。"""
+import io
+
+P = r'D:\z_data\.zcode\workspace\default\2025A\paper\main.tex'
+s = io.open(P, encoding='utf-8').read()
+
+R = []
+
+# ---- P1-1a: 表3 参数行统一为新解 ----
+R.append((r"航向角 $\theta$ & $7.809^\circ$（迎向导弹构型） \\",
+          r"航向角 $\theta$ & $8.225^\circ$（迎向导弹构型） \\"))
+R.append((r"飞行速度 $v$ & $70.000\ \mathrm{m/s}$ \\",
+          r"飞行速度 $v$ & $70.236\ \mathrm{m/s}$ \\"))
+R.append((r"投放点 / 起爆点 (m) & $(17802.0,0.3,1800)$ / $(17871.4,9.8,1795.1)$ \\",
+          r"投放点 / 起爆点 (m) & $(17801.0,0.1,1800)$ / $(17871.9,10.4,1794.9)$ \\"))
+R.append((r"遮蔽区间 (s) & $[1.577,\ 6.136]$ \\",
+          r"遮蔽区间 (s) & $[1.426,\ 5.996]$ \\"))
+R.append((r"验证相对差（求解网格 vs 独立网格） & $0.0072\%$ \\",
+          r"验证相对差（求解网格 vs 独立网格） & $0.0069\%$ \\"))
+
+# ---- P1-1b: 6.4 节两处旧数值 ----
+R.append((r"\textbf{边界最优性核查。}最优解 $v=70\,\mathrm{m/s}$ 位于速度下界、$t_f=1.0005\,\mathrm{s}$ 贴近引信下界。",
+          r"\textbf{边界最优性核查。}最优解 $v=70.24\,\mathrm{m/s}$ 位于速度下界附近、$t_f=1.021\,\mathrm{s}$ 贴近引信下界。"))
+
+# ---- P1-2: 摘要 Q4 尾数 ----
+R.append((r"并集遮蔽时长 $11.678\,\mathrm{s}$，高于优秀参赛论文的 $11.44\,\mathrm{s}$",
+          r"并集遮蔽时长 $11.677\,\mathrm{s}$，高于优秀参赛论文的 $11.44\,\mathrm{s}$"))
+
+# ---- P1-4: Q4 灵敏度表（按最终策略重跑 G8）----
+R.append((r"$R-10\%$ & $8.940$ & $0/3$ \\",
+          r"$R-10\%$ & $10.240$ & $0/3$ \\"))
+R.append((r"$R+10\%$ & $12.180$ & $0/3$ \\",
+          r"$R+10\%$ & $13.080$ & $0/3$ \\"))
+R.append((r"下沉速度 $-10\%$ & $11.160$ & $0/3$ \\",
+          r"下沉速度 $-10\%$ & $12.260$ & $0/3$ \\"))
+R.append((r"下沉速度 $+10\%$ & $10.000$ & $0/3$ \\",
+          r"下沉速度 $+10\%$ & $11.160$ & $0/3$ \\"))
+
+# ---- Q2 灵敏度表（按最终解重跑）----
+R.append((r"$R-10\%$（$9$ m） & $4.098$ & $8.8^\circ$ & 不变 & 否 \\",
+          r"$R-10\%$（$9$ m） & $4.088$ & $8.2^\circ$ & 不变 & 否 \\"))
+R.append((r"$R+10\%$（$11$ m） & $5.035$ & $7.8^\circ$ & 不变 & 否 \\",
+          r"$R+10\%$（$11$ m） & $5.051$ & $8.2^\circ$ & 不变 & 否 \\"))
+R.append((r"下沉速度 $-10\%$（$2.7$） & $4.803$ & $7.8^\circ$ & 不变 & 否 \\",
+          r"下沉速度 $-10\%$（$2.7$） & $4.804$ & $8.5^\circ$ & 不变 & 否 \\"))
+R.append((r"下沉速度 $+10\%$（$3.3$） & $4.336$ & $8.3^\circ$ & 不变 & 否 \\",
+          r"下沉速度 $+10\%$（$3.3$） & $4.327$ & $8.2^\circ$ & 不变 & 否 \\"))
+
+# ---- P1-5a: 文献引用（正文 8 处）----
+R.append((r"以假目标为原点 $O$，$x$ 轴正向为东",
+          r"以假目标为原点 $O$\cite{prob}，$x$ 轴正向为东"))
+R.append((r"投放点与弹道由式~\eqref{eq:kin}给出：",
+          r"由平抛运动模型\cite{phy}，投放点与弹道由式~\eqref{eq:kin}给出："))
+R.append((r"判定原语（图~\ref{fig:criterion}）为",
+          r"判定原语\cite{geom}（图~\ref{fig:criterion}）为"))
+R.append((r"②多起点 Nelder--Mead 精修——",
+          r"②多起点 Nelder--Mead\cite{nm} 精修——"))
+R.append((r"其三，针对粗网格对狭窄高值区的漏检（离散化伪影）",
+          r"其三，针对粗网格对狭窄高值区的漏检（离散化伪影），贪心策略参考文献\cite{algo}"))
+R.append((r"②多起点 Nelder--Mead 精修——取粗扫最优",
+          r"②多起点 Nelder--Mead\cite{nm} 精修——取粗扫最优"))
+R.append((r"（其采用遗传算法外层与粒子群内层的分层求解）",
+          r"（其采用遗传算法\cite{ga}外层与粒子群\cite{pso}内层的分层求解）"))
+R.append((r"求解框架为``逐机粗扫与结构热起点—窄网格精定位—坐标上升，并以机—弹配对能力矩阵的走廊候选补全盆地''求解",
+          r"求解框架为``逐机粗扫与结构热起点—窄网格精定位—坐标上升，并以机—弹配对能力矩阵的走廊候选补全盆地''求解，指派与精修的分层思想见\cite{or}"))
+R.append((r"摘要是全文的高度压缩与全面概述。",
+          r"摘要是全文的高度压缩与全面概述。"))
+
+for old, new in R:
+    assert old in s, 'NOT FOUND: ' + old[:60]
+    s = s.replace(old, new)
+applied = len(R)
+
+# ---- 新增 4 条参考文献 ----
+old_bib = r"\bibitem{or} 《运筹学》教材编写组. 运筹学: 第4版[M]. 北京: 清华大学出版社, 2012."
+new_bib = (old_bib + "\n"
+    r"\bibitem{algo} 司守奎, 孙玺菁. 数学建模算法与应用[M]. 2版. 北京: 国防工业出版社, 2015." + "\n"
+    r"\bibitem{geom} Preparata F P, Shamos M I. Computational Geometry: An Introduction[M]. New York: Springer-Verlag, 1985." + "\n"
+    r"\bibitem{pso} Kennedy J, Eberhart R. Particle swarm optimization[C]//Proceedings of ICNN'95--International Conference on Neural Networks. Perth: IEEE, 1995: 1942-1948." + "\n"
+    r"\bibitem{ga} Goldberg D E. Genetic Algorithms in Search, Optimization and Machine Learning[M]. Reading: Addison-Wesley, 1989.")
+assert old_bib in s
+s = s.replace(old_bib, new_bib)
+
+io.open(P, 'w', encoding='utf-8').write(s)
+print('论文 P1 修复完成：正文替换', applied, '处 + 参考文献 4→8 篇')

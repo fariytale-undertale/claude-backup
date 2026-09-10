@@ -1,0 +1,287 @@
+# -*- coding: utf-8 -*-
+"""问题4：p=1.7 m 盘入螺线，调头空间 r=4.5 m，S 形调头曲线（两圆弧相切，前段半径=后段2倍）。
+- 求解基线 2:1 S 曲线几何（符号组合枚举取几何有效者）
+- 填写 output/result4.xlsx（t=-100..100）
+- "能否变短"：解除 2:1 约束的曲线族 L(R2)（保持三相切），求最短曲线
+产出：figures/fig_q4_*.png、output/tables/q4_paper_table.xlsx。"""
+import numpy as np
+import openpyxl
+import os, re, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dragon_core import (Spiral, ReversedPath, TurnPath, walk_chain, chain_points,
+                         chain_speeds, chord_residual, S_arc, spiral_point,
+                         spiral_tangent, spiral_b, TWO_PI)
+from figures_common import save_fig, COLORS
+import matplotlib.pyplot as plt
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ATT = "D:/pdf/国赛/国赛历年真题/2024年赛题/A题/附件"
+t_start = time.time()
+P_PITCH = 1.7
+R_DISK = 4.5
+RATIO = 2.0
+
+b = spiral_b(P_PITCH)
+th_b = R_DISK / b
+A = spiral_point(np.array([th_b]), b)[0]
+T_in = -spiral_tangent(np.array([th_b]), b)[0]      # 盘入行进方向（theta 递减）
+nL = np.array([-T_in[1], T_in[0]])                   # 左法向
+Ap = -A
+w = A - Ap
+print(f"[几何] theta_b = {th_b:.6f} rad, A = ({A[0]:.6f}, {A[1]:.6f}), "
+      f"行进方向 T = ({T_in[0]:.6f}, {T_in[1]:.6f})")
+print(f"[几何] S(theta_b) = {float(S_arc(th_b, b)):.6f} m（盘入螺线上 A 的弧位）")
+
+
+def build_turn(R1, R2, s1, s2, sample_n=20000):
+    """给定半径与法向符号组合，构造 S 曲线。返回 dict 或 None（几何无效）。"""
+    O1 = A + s1 * R1 * nL
+    O2 = Ap + s2 * R2 * nL
+    dv = O2 - O1
+    dist = np.linalg.norm(dv)
+    if abs(dist - (R1 + R2)) > 1e-9 * max(R1 + R2, 1):
+        # 相切条件不满足（族参数化只在特定 R1(R2) 下成立）
+        pass
+    T1 = O1 + R1 * dv / dist                        # 两圆切点
+    sig1, sig2 = s1, s2                             # 由行进方向匹配推出 sigma = s
+    a1_0 = np.arctan2((A - O1)[1], (A - O1)[0])
+    a1_1 = np.arctan2((T1 - O1)[1], (T1 - O1)[0])
+    a2_0 = np.arctan2((T1 - O2)[1], (T1 - O2)[0])
+    a2_1 = np.arctan2((Ap - O2)[1], (Ap - O2)[0])
+    d1 = ((a1_1 - a1_0) % TWO_PI) if sig1 > 0 else ((a1_1 - a1_0) % TWO_PI - TWO_PI)
+    d2 = ((a2_1 - a2_0) % TWO_PI) if sig2 > 0 else ((a2_1 - a2_0) % TWO_PI - TWO_PI)
+    L1, L2 = R1 * abs(d1), R2 * abs(d2)
+    tp = TurnPath(P_PITCH, R_DISK, R1, R2, O1, O2, sig1, sig2, -6000.0, 6000.0)
+    # 校验：L1/L2 与 TurnPath 自洽
+    if abs(tp.L1 - L1) > 1e-6 or abs(tp.L2 - L2) > 1e-6:
+        return None
+    if not (0 < d1 < TWO_PI and 0 < d2 < TWO_PI):
+        return None
+    if d1 > np.pi + 1e-9 or d2 > np.pi + 1e-9:
+        return None                                 # 弧扫角过大（绕远）
+    mus = np.linspace(0.0, L1 + L2, sample_n)
+    pts = tp.point(mus)
+    rmax = float(np.max(np.linalg.norm(pts, axis=1)))
+    if rmax > R_DISK + 1e-6:
+        return None                                 # 越出调头空间
+    # 端点切向连续性校验
+    t0 = tp.tangent(np.array([1e-7]))[0]
+    t0m = tp.tangent(np.array([-1e-7]))[0]
+    tL = tp.tangent(np.array([L1 + L2 - 1e-7]))[0]
+    tLp = tp.tangent(np.array([L1 + L2 + 1e-7]))[0]
+    g1 = max(abs(np.dot(t0, t0m)), abs(np.dot(tL, tLp)))
+    return dict(R1=R1, R2=R2, O1=O1, O2=O2, sig1=sig1, sig2=sig2, T1=T1,
+                L1=L1, L2=L2, L=L1 + L2, rmax=rmax, tp=tp, g1=g1)
+
+
+# ---------- 基线 2:1 曲线：符号组合枚举 ----------
+print("\n[基线] 符号组合枚举（R1=2R2）：")
+valid = []
+for s1, s2 in ((1, -1), (-1, 1)):
+    # |w + R2(2 s1 - s2) nL| = 3 R2  →  线性方程 R2 = -|w|^2 / (2 w·v)
+    v = (2 * s1 - s2) * nL
+    R2 = -np.dot(w, w) / (2 * np.dot(w, v))
+    print(f"    (s1,s2)=({s1:+d},{s2:+d}): R2 = {R2:.6f} m", end="  ")
+    if R2 <= 0:
+        print("→ 舍弃（R2<=0）")
+        continue
+    sol = build_turn(2 * R2, R2, s1, s2)
+    if sol is None:
+        print("→ 舍弃（几何无效/越界）")
+        continue
+    print(f"→ 有效: R1={2*R2:.6f}, L={sol['L']:.6f}, 弧扫角=({np.degrees(sol['L1']/sol['R1']):.2f}°, "
+          f"{np.degrees(sol['L2']/sol['R2']):.2f}°), 曲线最大半径={sol['rmax']:.6f}")
+    valid.append(sol)
+assert len(valid) == 1, f"有效组合数={len(valid)}（预期唯一）"
+base = valid[0]
+tp = base["tp"]
+L_base = base["L"]
+print(f"[基线] 2:1 S 曲线: R2={base['R2']:.6f}, R1={base['R1']:.6f}, "
+      f"切点 T1=({base['T1'][0]:.6f}, {base['T1'][1]:.6f}), 总长 L={L_base:.6f} m")
+print(f"[检验] 端点切向连续性指标 = {base['g1']:.6f} (应=1)")
+print(f"[检验] |A|=({np.linalg.norm(A):.6f}) 应=4.5; 曲线在盘内 rmax={base['rmax']:.6f}")
+
+# ---------- result4 填写（基线路径） ----------
+ts4 = np.arange(-100, 101, dtype=float)
+mu4 = walk_chain(tp, ts4)                    # 头部 mu = t（v0=1）
+X4 = chain_points(tp, mu4)
+sd4 = chain_speeds(tp, mu4, 1.0)
+v4 = np.abs(sd4)
+res4 = chord_residual(tp, mu4)
+print(f"\n[检验] result4 批量弦长残差 = {res4:.3e}")
+assert res4 < 1e-8
+# 差分互证
+h = 1e-6
+for t_chk in (-50.0, 0.0, 50.0):
+    Xp = chain_points(tp, walk_chain(tp, np.array([t_chk + h])))[0]
+    Xm = chain_points(tp, walk_chain(tp, np.array([t_chk - h])))[0]
+    vfd = np.linalg.norm(Xp - Xm, axis=1) / (2 * h)
+    rel = np.abs(v4[int(t_chk) + 100] - vfd) / vfd
+    print(f"[检验] t={t_chk:+.0f}s 递推vs差分 max rel err = {rel.max():.2e}")
+    assert rel.max() < 1e-4
+# t=0 龙头应位于 A
+print(f"[检验] t=0 龙头位置 = ({X4[100,0]:.6f}, {X4[100,1]:.6f}) 应=({A[0]:.6f}, {A[1]:.6f})")
+assert np.linalg.norm(X4[100, 0] - A) < 1e-9
+
+wb = openpyxl.load_workbook(f"{ATT}/result4.xlsx")
+ws_pos, ws_vel = wb["位置"], wb["速度"]
+tcol = {}
+for c in range(2, ws_pos.max_column + 1):
+    lab = ws_pos.cell(row=1, column=c).value
+    tcol[int(str(lab).replace("s", "").strip())] = c
+for r in range(2, ws_pos.max_row + 1):
+    lab = ws_pos.cell(row=r, column=1).value
+    if lab.startswith("龙头"):
+        k = 0
+    elif lab.startswith("龙尾（后）"):
+        k = 223
+    elif lab.startswith("龙尾"):
+        k = 222
+    else:
+        k = int(re.match(r"^第(\d+)节龙身", lab).group(1))
+    isy = "y" in lab
+    for t, c in tcol.items():
+        ws_pos.cell(row=r, column=c).value = round(float(X4[t, k, 1 if isy else 0]), 6) + 0.0
+tcolv = {}
+for c in range(2, ws_vel.max_column + 1):
+    lab = ws_vel.cell(row=1, column=c).value
+    tcolv[int(str(lab).replace("s", "").strip())] = c
+for r in range(2, ws_vel.max_row + 1):
+    lab = ws_vel.cell(row=r, column=1).value
+    if lab.startswith("龙头"):
+        k = 0
+    elif lab.startswith("龙尾（后）"):
+        k = 223
+    elif lab.startswith("龙尾"):
+        k = 222
+    else:
+        k = int(re.match(r"^第(\d+)节龙身", lab).group(1))
+    for t, c in tcolv.items():
+        ws_vel.cell(row=r, column=c).value = round(float(v4[t, k]), 6) + 0.0
+wb.save(f"{ROOT}/output/result4.xlsx")
+print("saved:", f"{ROOT}/output/result4.xlsx")
+
+paper_rows = [("龙头", 0), ("第1节龙身", 1), ("第51节龙身", 51), ("第101节龙身", 101),
+              ("第151节龙身", 151), ("第201节龙身", 201), ("龙尾（后）", 223)]
+paper_ts = [-100, -50, 0, 50, 100]
+wb_out = openpyxl.Workbook()
+ws1 = wb_out.active; ws1.title = "位置"
+ws1.append([""] + [f"{t} s" for t in paper_ts])
+for name, k in paper_rows:
+    ws1.append([f"{name}x (m)"] + [round(float(X4[t + 100, k, 0]), 6) for t in paper_ts])
+    ws1.append([f"{name}y (m)"] + [round(float(X4[t + 100, k, 1]), 6) for t in paper_ts])
+ws2 = wb_out.create_sheet("速度")
+ws2.append([""] + [f"{t} s" for t in paper_ts])
+for name, k in paper_rows:
+    ws2.append([f"{name} (m/s)"] + [round(float(v4[t + 100, k]), 6) for t in paper_ts])
+wb_out.save(f"{ROOT}/output/tables/q4_paper_table.xlsx")
+print("saved:", f"{ROOT}/output/tables/q4_paper_table.xlsx")
+print("\n== 问题4 表（基线 2:1 曲线） ==")
+for name, k in paper_rows:
+    print(f"{name:>10} " + "  ".join(
+        f"t={t:+4d}: ({X4[t+100,k,0]:>8.4f},{X4[t+100,k,1]:>8.4f}) v={v4[t+100,k]:.4f}"
+        for t in paper_ts[:3]))
+
+# ---------- "能否变短"：曲线族 L(R2) ----------
+# 族参数化（保持三相切，符号组合取基线）: R1 = 3*R2_base - R2
+R2_b = base["R2"]
+print("\n[族] L(R2) 扫描（R1 = 3R2_b - R2, 保持三相切）:")
+R2s = np.arange(0.02 * R2_b, 2.98 * R2_b, 0.005 * R2_b)
+Ls = np.full(len(R2s), np.nan)
+rmaxs = np.full(len(R2s), np.nan)
+for i, R2 in enumerate(R2s):
+    sol = build_turn(3 * R2_b - R2, R2, base["sig1"], base["sig2"], sample_n=6000)
+    if sol is not None:
+        Ls[i], rmaxs[i] = sol["L"], sol["rmax"]
+ok_mask = ~np.isnan(Ls)
+print(f"    有效参数占比 = {ok_mask.mean():.2%}, R2 有效范围 = "
+      f"[{R2s[ok_mask].min():.4f}, {R2s[ok_mask].max():.4f}]")
+i_min = int(np.nanargmin(Ls))
+print(f"    网格最短: R2* ≈ {R2s[i_min]:.5f}, L* ≈ {Ls[i_min]:.6f}")
+# 黄金分割精修（在网格最优点邻域）
+from scipy.optimize import minimize_scalar
+def L_of(R2):
+    sol = build_turn(3 * R2_b - R2, R2, base["sig1"], base["sig2"], sample_n=4000)
+    return sol["L"] if sol is not None else 1e9
+r_min = minimize_scalar(L_of, bounds=(R2s[max(i_min - 3, 0)], R2s[min(i_min + 3, len(R2s) - 1)]),
+                        method="bounded", options={"xatol": 1e-8})
+R2_star = float(r_min.x)
+opt = build_turn(3 * R2_b - R2_star, R2_star, base["sig1"], base["sig2"], sample_n=40000)
+L_star = opt["L"]
+print(f"[求解] 最短调头曲线: R2* = {R2_star:.6f} m, R1* = {opt['R1']:.6f} m, "
+      f"L* = {L_star:.6f} m（基线 {L_base:.6f} m，缩短 {L_base-L_star:.6f} m, "
+      f"{100*(L_base-L_star)/L_base:.2f}%）")
+print(f"[检验] 最短曲线 rmax = {opt['rmax']:.6f} ≤ 4.5（盘内）; "
+      f"结论：{'能' if L_star < L_base - 1e-9 else '不能'}调整圆弧使调头曲线变短")
+
+# ---------- 图 ----------
+fig, ax = plt.subplots(figsize=(8.6, 8.6))
+# 两螺线
+bq = b
+th_in = np.linspace(th_b, th_b + 40, 3000)
+pin = spiral_point(th_in, bq)
+ax.plot(pin[:, 0], pin[:, 1], color="0.8", lw=0.8)
+ax.plot(-pin[:, 0], -pin[:, 1], color="0.8", lw=0.8, label="盘入/盘出螺线")
+th_sm = np.linspace(1e-6, th_b, 2000)
+psp = spiral_point(th_sm, bq)
+ax.plot(psp[:, 0], psp[:, 1], color="0.92", lw=0.5)
+ax.plot(-psp[:, 0], -psp[:, 1], color="0.92", lw=0.5)
+# 基线曲线与最短曲线
+for sol, c, lab in ((base, "#1f77b4", f"基线 2:1 曲线（L={L_base:.4f} m）"),
+                    (opt, "#2ca02c", f"最短曲线（L*={L_star:.4f} m）")):
+    mus = np.linspace(0, sol["L"], 3000)
+    pts = sol["tp"].point(mus)
+    ax.plot(pts[:, 0], pts[:, 1], color=c, lw=1.8, label=lab)
+circ = plt.Circle((0, 0), R_DISK, fill=False, color="#d62728", ls="--", lw=1.1,
+                  label="调头空间边界（r=4.5 m）")
+ax.add_patch(circ)
+for pt, nm in ((A, "A"), (Ap, "A'"), (base["T1"], "T1")):
+    ax.plot([pt[0]], [pt[1]], "k.", ms=7)
+    ax.annotate(nm, pt, textcoords="offset points", xytext=(5, 5), fontsize=10)
+ax.plot(0, 0, "k+", ms=10)
+ax.set_aspect("equal")
+ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
+ax.set_xlim(-6.5, 6.5); ax.set_ylim(-6.5, 6.5)
+ax.set_title("调头几何：基线 2:1 S 曲线与最短曲线")
+ax.legend(fontsize=8, loc="upper right")
+save_fig(fig, "fig_q4_geom.png")
+
+fig, ax = plt.subplots(figsize=(7.4, 4.6))
+ax.plot(R2s[ok_mask], Ls[ok_mask], "-", color="#1f77b4", lw=1.4, label="曲线族 L(R2)")
+ax.plot([R2_b], [L_base], "o", color="#9467bd", ms=6, label=f"基线 2:1（L={L_base:.4f}）")
+ax.plot([R2_star], [L_star], "*", color="#d62728", ms=12,
+        label=f"最短 R2*={R2_star:.4f}（L*={L_star:.4f}）")
+ax.set_xlabel("后段圆弧半径 R2 (m)"); ax.set_ylabel("调头曲线长度 L (m)")
+ax.set_title("保持三相切的调头曲线族长度")
+ax.legend(fontsize=9)
+save_fig(fig, "fig_q4_Lcurve.png")
+
+fig, (axa, axb) = plt.subplots(1, 2, figsize=(12.0, 6.4))
+for t, c in ((-50, "#1f77b4"), (50, "#d62728")):
+    axa.plot(X4[t + 100, :, 0], X4[t + 100, :, 1], ".", ms=2.2, color=c, label=f"t={t:+d} s")
+circ = plt.Circle((0, 0), R_DISK, fill=False, color="0.65", ls=":", lw=1)
+axa.add_patch(circ)
+axa.plot(0, 0, "k+", ms=9)
+axa.set_aspect("equal")
+axa.set_xlabel("x (m)"); axa.set_ylabel("y (m)")
+axa.set_title("调头前后全队位形")
+axa.legend(fontsize=9)
+# t=0 局部放大：龙头在 S 曲线上
+axb.plot(X4[100, :, 0], X4[100, :, 1], ".-", ms=3.5, lw=0.7, color="#1f77b4",
+         label="t=0 把手链")
+mus = np.linspace(-30, 30, 2000)
+pts = tp.point(mus)
+axb.plot(pts[:, 0], pts[:, 1], color="0.85", lw=1.0, label="调头路径")
+circ = plt.Circle((0, 0), R_DISK, fill=False, color="#d62728", ls="--", lw=1.1)
+axb.add_patch(circ)
+axb.plot([A[0]], [A[1]], "k*", ms=10)
+axb.annotate("A（t=0 龙头）", A, textcoords="offset points", xytext=(6, 6), fontsize=9)
+axb.set_xlim(-6, 6); axb.set_ylim(-6, 6)
+axb.set_aspect("equal")
+axb.set_xlabel("x (m)"); axb.set_ylabel("y (m)")
+axb.set_title("t=0 局部：龙头位于调头曲线起点")
+axb.legend(fontsize=9)
+fig.tight_layout()
+save_fig(fig, "fig_q4_configs.png")
+
+print(f"\n[运行时间] 问题4 总耗时 {time.time()-t_start:.1f} s")

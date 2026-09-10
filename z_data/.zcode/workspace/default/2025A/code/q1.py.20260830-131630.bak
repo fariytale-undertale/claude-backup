@@ -1,0 +1,142 @@
+# -*- coding: utf-8 -*-
+"""问题1：FY1 投放 1 枚烟幕干扰弹对 M1 的有效遮蔽时长（参数题面给定，无优化）。
+正文所有数字来自本脚本 print；图表由本脚本就地生成（图表同源）。"""
+import numpy as np
+import time
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import (UAVS, TGT_MID, target_samples, shading_intervals, union_length,
+                    burst_point, missile_pos, T_END)
+import plotstyle as ps
+ps.set_figdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'output', 'figures'))
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+T0 = time.time()
+
+# ---------------- 题面给定参数 ----------------
+uav0 = UAVS['FY1']
+heading, speed, t_drop, t_fuse = 180.0, 120.0, 1.5, 3.6   # 朝假目标(原点)方向→航向180°
+B, t_b = burst_point(uav0, heading, speed, t_drop, t_fuse)
+# 投放点：U(t_drop) = uav0 + t_drop·v0
+P_d = uav0 + speed * t_drop * np.array([np.cos(np.deg2rad(heading)), np.sin(np.deg2rad(heading)), 0.0])
+print(f"投放点  P_d = ({P_d[0]:.3f}, {P_d[1]:.3f}, {P_d[2]:.3f})  t_drop={t_drop}s")
+print(f"起爆点  B   = ({B[0]:.3f}, {B[1]:.3f}, {B[2]:.6f})  t_b={t_b}s")
+print(f"云团有效期 [{t_b}, {t_b + 20.0}]s; M1 到达假目标 T_END={T_END['M1']:.4f}s")
+
+# ---------------- 遮蔽区间（体判据主口径 + 点判据对比）----------------
+samples = target_samples()                       # 108 点
+iv_body, _, _ = shading_intervals(uav0, heading, speed, t_drop, t_fuse, 'M1',
+                                  dt=0.05, samples=samples, criterion='body')
+iv_point, _, _ = shading_intervals(uav0, heading, speed, t_drop, t_fuse, 'M1',
+                                   dt=0.05, samples=None, criterion='point')
+tau_body, tau_point = union_length(iv_body), union_length(iv_point)
+print(f"\n[体判据] 遮蔽区间 = {[(round(a,6), round(b,6)) for a,b in iv_body]}")
+print(f"[体判据] 有效遮蔽时长 tau_body = {tau_body:.6f} s")
+print(f"[点判据] 遮蔽区间 = {[(round(a,6), round(b,6)) for a,b in iv_point]}")
+print(f"[点判据] 有效遮蔽时长 tau_point = {tau_point:.6f} s")
+print(f"抽象层差异: 点-体 = {tau_point - tau_body:+.6f} s ({(tau_point - tau_body)/tau_body*100:+.3f}%)")
+
+# ---------------- 网格收敛性检验（A 题硬指标）----------------
+print("\n---- 时间网格收敛（体判据, 108点）----")
+res_t = []
+for dt in (0.1, 0.05, 0.02, 0.01):
+    iv, _, _ = shading_intervals(uav0, heading, speed, t_drop, t_fuse, 'M1',
+                                 dt=dt, samples=samples, criterion='body')
+    res_t.append((dt, union_length(iv)))
+    print(f"  dt={dt:5.3f}s -> tau={union_length(iv):.6f}s")
+base_tau = res_t[-1][1]
+for dt, tv in res_t:
+    rel = abs(tv - base_tau) / base_tau * 100
+    print(f"  与 dt=0.01 基准相对差 (dt={dt}): {rel:.4f}%")
+
+print("---- 采样密度收敛（体判据, dt=0.05）----")
+res_s = []
+for nc, nr in ((36, 3), (48, 4), (72, 4)):
+    smp = target_samples(nc, nr)
+    iv, _, _ = shading_intervals(uav0, heading, speed, t_drop, t_fuse, 'M1',
+                                 dt=0.05, samples=smp, criterion='body')
+    res_s.append((nc * nr, union_length(iv)))
+    print(f"  采样 {nc * nr:4d} 点 -> tau={union_length(iv):.6f}s")
+ref = res_s[-1][1]
+for n, tv in res_s:
+    print(f"  与 {res_s[-1][0]} 点基准相对差 ({n}点): {abs(tv - ref) / ref * 100:.4f}%")
+
+# ---------------- 结果表 ----------------
+tabs = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'output', 'tables')
+os.makedirs(tabs, exist_ok=True)
+with open(os.path.join(tabs, 'q1_result.md'), 'w', encoding='utf-8') as f:
+    f.write("# 问题1 结果\n\n")
+    f.write("| 量 | 数值 |\n|---|---|\n")
+    f.write(f"| 投放点 (m) | ({P_d[0]:.1f}, {P_d[1]:.1f}, {P_d[2]:.1f}) |\n")
+    f.write(f"| 起爆点 (m) | ({B[0]:.1f}, {B[1]:.1f}, {B[2]:.3f}) |\n")
+    f.write(f"| 起爆时刻 (s) | {t_b:.3f} |\n")
+    f.write(f"| 遮蔽区间·体判据 (s) | [{iv_body[0][0]:.6f}, {iv_body[0][1]:.6f}] |\n")
+    f.write(f"| **有效遮蔽时长·体判据 (s)** | **{tau_body:.3f}** |\n")
+    f.write(f"| 有效遮蔽时长·点判据 (s)（对比） | {tau_point:.3f} |\n")
+
+# ---------------- 图 1：3D 轨迹场景 ----------------
+fig = plt.figure(figsize=(10, 8))
+ax = fig.add_subplot(111, projection='3d')
+tg_m = np.linspace(0, T_END['M1'], 200)
+mp = missile_pos('M1', tg_m)
+ax.plot(mp[:, 0], mp[:, 1], mp[:, 2], 'r-', lw=2, label='M1弹道')
+tg_u = np.linspace(0, t_drop, 20)
+up = uav0 + speed * tg_u[:, None] * np.array([np.cos(np.deg2rad(heading)), np.sin(np.deg2rad(heading)), 0.0])
+ax.plot(up[:, 0], up[:, 1], up[:, 2], 'g-', lw=2, label='FY1航迹')
+tg_b = np.linspace(t_drop, t_b, 40)
+bp = np.array([uav0 + speed * t * np.array([np.cos(np.deg2rad(heading)), np.sin(np.deg2rad(heading)), 0.0]) for t in tg_b])
+bp[:, 2] -= 0.5 * 9.8 * (tg_b - t_drop) ** 2
+ax.plot(bp[:, 0], bp[:, 1], bp[:, 2], 'orange', lw=2, label='干扰弹弹道')
+ax.scatter(*uav0, color='g', s=40)
+ax.scatter(*B, color='orange', marker='*', s=140, label='起爆点')
+ax.scatter(0, 0, 0, color='k', marker='s', s=60, label='假目标(原点)')
+# 真目标圆柱
+th = np.linspace(0, 2 * np.pi, 40)
+zz = np.linspace(0, 10, 3)
+TH, ZZ = np.meshgrid(th, zz)
+XS = 7 * np.cos(TH); YS = 200 + 7 * np.sin(TH)
+ax.plot_surface(XS, YS, ZZ, alpha=0.5, color='slategray')
+ax.scatter(0, 200, 5, color='blue', s=40, label='真目标轴线中点')
+# 云团球（起爆/区间起点/终点三个时刻）
+phi, theta = np.mgrid[0:np.pi:16j, 0:2 * np.pi:24j]
+def sphere(c, r):
+    return c[0] + r * np.sin(phi) * np.cos(theta), c[1] + r * np.sin(phi) * np.sin(theta), c[2] + r * np.cos(phi)
+for tt, col in ((t_b, 'royalblue'), (iv_body[0][0], 'deepskyblue'), (iv_body[0][1], 'lightsteelblue')):
+    c = np.array(B) - np.array([0, 0, 3.0 * (tt - t_b)])
+    XS, YS, ZS = sphere(c, 10.0)
+    ax.plot_surface(XS, YS, ZS, alpha=0.18, color=col)
+    ax.scatter(*c, color=col, s=15)
+ax.text(*(B + [0, 0, 15]), f'起爆 t={t_b:.1f}s', fontsize=9)
+ax.set_xlabel('x / m'); ax.set_ylabel('y / m'); ax.set_zlabel('z / m')
+ps.equal3d(ax)
+ax.set_title('问题1：FY1—干扰弹—云团—M1—真目标 3D 场景')
+ax.legend(loc='upper left', fontsize=9)
+ps.save(fig, 'q1_traj_3d.png')
+
+# ---------------- 图 2：遮蔽区间时间轴 ----------------
+fig, ax = plt.subplots(figsize=(9, 3.2))
+ax.axvspan(t_b, t_b + 20, alpha=0.08, color='gray', label='云团有效期20s')
+for k, (iv, col, lab) in enumerate([(iv_point, 'steelblue', '点判据(对比)'), (iv_body, 'crimson', '体判据(主口径)')]):
+    for a, b2 in iv:
+        ax.barh(k, b2 - a, left=a, height=0.45, color=col, alpha=0.85)
+        ax.text(a + (b2 - a) / 2, k, f'{b2 - a:.3f}s', ha='center', va='center', color='w', fontsize=10)
+ax.axvline(t_b, color='orange', ls='--', lw=1, label=f'起爆 t_b={t_b:.1f}s')
+ax.set_yticks([0, 1]); ax.set_yticklabels(['点判据(对比)', '体判据(主口径)'])
+ax.set_ylabel('判据口径'); ax.set_xlabel('时间 t / s')
+ax.set_ylim(-0.6, 1.7); ax.set_xlim(t_b - 1, t_b + 21)
+ax.set_title(f'问题1：对 M1 的有效遮蔽区间（体判据 {tau_body:.3f} s，点判据 {tau_point:.3f} s）')
+ax.legend(loc='upper right', fontsize=8)
+ps.save(fig, 'q1_interval.png')
+
+# ---------------- 图 3：双判据对比 ----------------
+fig, ax = plt.subplots(figsize=(5.5, 3.6))
+bars = ax.bar(['体判据\n(108点,主口径)', '点判据\n(轴线中点,对比)'], [tau_body, tau_point],
+              color=['crimson', 'steelblue'], width=0.5)
+for b_, v in zip(bars, (tau_body, tau_point)):
+    ax.text(b_.get_x() + b_.get_width() / 2, v + 0.015, f'{v:.3f} s', ha='center', fontsize=11)
+ax.set_ylabel('有效遮蔽时长 / s'); ax.set_ylim(0, max(tau_body, tau_point) * 1.22)
+ax.set_title('问题1：遮蔽判据抽象层对比（点判据高估 %.2f%%）' % ((tau_point - tau_body) / tau_body * 100))
+ps.save(fig, 'q1_criteria_compare.png')
+
+print(f"\n[运行时间] {time.time() - T0:.2f} s")

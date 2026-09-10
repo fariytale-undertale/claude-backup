@@ -1,0 +1,277 @@
+# -*- coding: utf-8 -*-
+"""问题3：FY1 投 3 弹对 M1，最大化并集遮蔽时长。
+决策：共享(θ,v) + 3×(t_d,t_f)，同机投放间隔≥1s（重参数化内嵌）。
+G3：(θ,v) 全域网格 × 逐弹贪心内层；再联合 NM 多起点精修；独立网格验证。"""
+import numpy as np
+import time
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import (UAVS, target_samples, T_FUSE_MIN, T_END,
+                    shading_intervals, union_length, burst_point)
+from solver import tau_of, nelder_mead
+import plotstyle as ps
+ps.set_figdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'output', 'figures'))
+import matplotlib.pyplot as plt
+
+T0 = time.time()
+uav0 = UAVS['FY1']
+SAMPLES = target_samples()
+SAMPLES_V = target_samples(48, 4)
+
+def bombs_from_vec(hd, sp, tds, tfs):
+    return [(uav0, hd, sp, td, tf) for td, tf in zip(tds, tfs)]
+
+def tau3(hd, sp, tds, tfs, dt=0.05, samples=SAMPLES):
+    return tau_of(bombs_from_vec(hd, sp, tds, tfs), dt=dt, samples=samples)
+
+# ================= 阶段A：G3 全参数域粗扫（(θ,v) 网格 × 逐弹贪心）=================
+tA = time.time()
+td_grid = np.arange(0.0, 25.0, 2.0)
+tf_grid = (1.0, 2.0, 3.0, 4.0, 5.7, 7.0, 9.0, 11.0, 13.0, 15.0)   # 含后段走廊甜点 tf≈5.7（z≈1640）
+cell_results = []
+n_eval = 0
+import pickle
+cache3 = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'q3_scan_cache.pkl')
+if os.path.exists(cache3):
+    with open(cache3, 'rb') as f:
+        cell_results, n_eval = pickle.load(f)
+    print(f"[阶段A G3粗扫] 复用缓存 {len(cell_results)} 格")
+else:
+    for hd in np.arange(0.0, 360.0, 8.0):
+        for sp in (70.0, 105.0, 140.0):
+            chosen = []          # [(td, tf, iv)]
+            last_td = -10.0
+            for k in range(3):
+                best_gain, best = -1.0, None
+                base_iv = [seg for _, _, ivl in chosen for seg in ivl]   # 展平为区间元组列表
+                for td in td_grid:
+                    if td < last_td + 1.0 - 1e-9:
+                        continue
+                    for tf in tf_grid:
+                        from solver import coarse_intervals
+                        iv = coarse_intervals(uav0, hd, sp, td, tf, 'M1', dt=0.1, samples=SAMPLES)
+                        n_eval += 1
+                        gain = union_length(base_iv + iv) - union_length(base_iv)
+                        if gain > best_gain:
+                            best_gain, best = gain, (td, tf, iv)
+                if best is None or best_gain <= 1e-9:
+                    break
+                chosen.append(best)
+                last_td = best[0]
+            total = union_length([seg for _, _, ivl in chosen for seg in ivl])
+            cell_results.append((total, hd, sp, [(td, tf) for td, tf, _ in chosen]))
+    with open(cache3, 'wb') as f:
+        pickle.dump((cell_results, n_eval), f)
+cell_results.sort(key=lambda r: -r[0])
+t_scan = time.time() - tA
+print(f"[阶段A G3粗扫] (θ步长8°×v3档)×逐弹贪心(td×tf网格) 评估{n_eval}次 耗时{t_scan:.1f}s")
+print("  Top3 网格解:")
+for tot, hd, sp, tt in cell_results[:3]:
+    print(f"    τ={tot:.3f}s  hd={hd:.0f}° v={sp:.0f}  (td,tf)={tt}")
+
+# ================= 阶段B：联合 NM 多起点精修（8维，间隔重参数化）=================
+tB = time.time()
+def unpack(y):
+    hd = y[0] % 360.0
+    sp = 70.0 + 70.0 / (1.0 + np.exp(-y[1]))
+    td1 = y[2] ** 2
+    td2 = td1 + 1.0 + y[3] ** 2
+    td3 = td2 + 1.0 + y[4] ** 2
+    tfs = [T_FUSE_MIN + y[5 + k] ** 2 for k in range(3)]
+    return hd, sp, [td1, td2, td3], tfs
+
+def neg_tau3(y):
+    hd, sp, tds, tfs = unpack(y)
+    return -tau3(hd, sp, tds, tfs)
+
+def to_y(hd, sp, tds, tfs):
+    return np.array([hd,
+                     np.log(max(sp - 70, 1e-6) / max(140 - sp, 1e-6)),
+                     np.sqrt(max(tds[0], 0.05)),
+                     np.sqrt(max(tds[1] - tds[0] - 1.0, 0.05)),
+                     np.sqrt(max(tds[2] - tds[1] - 1.0, 0.05)),
+                     np.sqrt(max(tfs[0] - T_FUSE_MIN, 0.05)),
+                     np.sqrt(max(tfs[1] - T_FUSE_MIN, 0.05)),
+                     np.sqrt(max(tfs[2] - T_FUSE_MIN, 0.05))])
+
+starts = []
+for tot, hd, sp, tt in cell_results[:3]:
+    tds = [t[0] for t in tt]; tfs = [t[1] for t in tt]
+    while len(tds) < 3:      # 贪心可能只选1-2弹，填充为顺延投放
+        tds.append(tds[-1] + 1.5); tfs.append(1.5)
+    starts.append(('粗扫贪心', to_y(hd, sp, tds, tfs)))
+# Q2 最优 + 时序错开（三弹覆盖同一走廊的先后段）
+starts.append(('Q2错峰', to_y(7.8088, 70.0, [0.03, 1.5, 3.0], [1.0, 1.5, 2.0])))
+# 朝假目标走廊（-x）三段窗口：早期 tf≈1、中段 tf≈3.5、后段甜点 tf≈5.7
+starts.append(('走廊三段A', to_y(180.0, 140.0, [0.0, 2.0, 4.3], [1.0, 3.5, 5.7])))
+starts.append(('走廊三段B', to_y(180.0, 120.0, [1.0, 4.0, 7.0], [2.0, 4.5, 6.5])))
+starts.append(('走廊三段C', to_y(184.0, 100.0, [0.5, 3.0, 6.0], [1.2, 4.0, 6.0])))
+print(f"\n[阶段B 联合NM] 起点{len(starts)}个（粗扫贪心3+Q2错峰+走廊三段3），8维")
+results = []
+hist_best = None
+for kind, y0 in starts:
+    xb, fb, nfev, hist = nelder_mead(neg_tau3, y0, max_iter=800, step=0.25)
+    results.append((fb, xb, kind, nfev))
+    if hist_best is None or hist[-1] < hist_best[-1]:
+        hist_best = hist
+results.sort(key=lambda r: r[0])
+fb, xb, kind, nfev = results[0]
+hd, sp, tds, tfs = unpack(xb)
+t_nm = time.time() - tB
+print(f"  NM完成 耗时{t_nm:.1f}s；最优起点={kind} nfev={nfev}")
+print(f"  NM最优(求解网格): τ={-fb:.4f}s  hd={hd:.3f}° v={sp:.2f}")
+print(f"    t_d={[round(t,4) for t in tds]}  t_f={[round(t,4) for t in tfs]}")
+
+# ================= 阶段C：独立验证 =================
+tC = time.time()
+ivs_each, alliv, Bs, tbs = [], [], [], []
+for k in range(3):
+    iv, B, tb = shading_intervals(uav0, hd, sp, tds[k], tfs[k], 'M1', dt=0.02, samples=SAMPLES_V, criterion='body')
+    ivs_each.append(iv); alliv += iv; Bs.append(B); tbs.append(tb)
+tau_ref = union_length(alliv)
+ivs5 = []
+for k in range(3):
+    iv5, _, _ = shading_intervals(uav0, hd, sp, tds[k], tfs[k], 'M1', dt=0.05, samples=SAMPLES, criterion='body')
+    ivs5 += iv5
+tau_s5 = union_length(ivs5)
+print(f"\n[阶段C 独立验证] dt=0.02/192点/二分: τ={tau_ref:.6f}s（与求解网格 {tau_s5:.6f} 相对差 {abs(tau_ref-tau_s5)/tau_ref*100:.4f}%）")
+for k in range(3):
+    print(f"    弹{k+1}: t_d={tds[k]:.4f} t_f={tfs[k]:.4f} 起爆t={tbs[k]:.4f}s 单独遮蔽={union_length(ivs_each[k]):.4f}s 区间={[(round(a,4),round(b,4)) for a,b in ivs_each[k]]}")
+t_val = time.time() - tC
+
+# G5 边界哨兵
+flags = []
+if abs(sp - 70) < 1e-3 or abs(sp - 140) < 1e-3: flags.append(f"v={sp:.3f}贴速度界")
+for k in range(3):
+    if tfs[k] - T_FUSE_MIN < 1e-3: flags.append(f"tf{k+1}={tfs[k]:.4f}贴引信下界")
+    if tds[k] < 1e-3: flags.append(f"td{k+1}={tds[k]:.4f}贴0")
+gaps = [tds[1] - tds[0], tds[2] - tds[1]]
+print(f"[G5 边界哨兵] 投放间隔={[round(g,4) for g in gaps]}（下界1s）" +
+      ("；⚠ " + "; ".join(flags) if flags else "；其余参数不在边界"))
+
+# 引信下界敏感性扫描（G0 闸门证据：0.5 / 1.0 / 2.0）
+print("\n[G0 扫描] 引信下界敏感性（下界变更后全流程重优化）：")
+import common as C
+import solver as S2
+base_tf = C.T_FUSE_MIN
+for lb in (0.5, 1.0, 2.0):
+    C.T_FUSE_MIN = lb; S2.T_FUSE_MIN = lb
+    globals()['T_FUSE_MIN_lb'] = lb
+    def neg_tau3_lb(y, _lb=lb):
+        hd_ = y[0] % 360.0
+        sp_ = 70.0 + 70.0 / (1.0 + np.exp(-y[1]))
+        td1 = y[2] ** 2; td2 = td1 + 1.0 + y[3] ** 2; td3 = td2 + 1.0 + y[4] ** 2
+        tfs_ = [_lb + y[5 + k] ** 2 for k in range(3)]
+        return -tau3(hd_, sp_, [td1, td2, td3], tfs_)
+    xlb, flb, _, _ = nelder_mead(neg_tau3_lb, xb, max_iter=400)
+    hdl, spl, tdsl, tfsl = unpack(xlb)
+    C.T_FUSE_MIN = base_tf; S2.T_FUSE_MIN = base_tf
+    tag = " ←本次口径" if abs(lb - 1.0) < 1e-9 else ""
+    print(f"    t_f≥{lb}: τ={-flb:.3f}s  hd={hdl:.1f}° v={spl:.0f} tf={[round(t,2) for t in tfsl]}{tag}")
+print("  → 下界 0.5→2.0 的 τ 变化即下界敏感性；1.0 为用户闸门确认值。")
+
+# ================= 图表 =================
+# 图1 3D
+fig = plt.figure(figsize=(10, 8)); ax = fig.add_subplot(111, projection='3d')
+th = np.deg2rad(hd)
+tg_m = np.linspace(0, T_END['M1'], 200)
+mdir = -np.array([20000.0, 0, 2000.0]) / np.linalg.norm([20000.0, 0, 2000.0])
+mp = np.array([20000.0, 0, 2000.0])[None, :] + 300 * tg_m[:, None] * mdir[None, :]
+ax.plot(mp[:, 0], mp[:, 1], mp[:, 2], 'r-', lw=2, label='M1弹道')
+tg_u = np.linspace(0, max(tds[-1] + tfs[-1], 1), 60)
+up = uav0[None, :] + sp * tg_u[:, None] * np.array([np.cos(th), np.sin(th), 0.0])[None, :]
+ax.plot(up[:, 0], up[:, 1], up[:, 2], 'g-', lw=2, label='FY1航迹')
+phi, theta_g = np.mgrid[0:np.pi:14j, 0:2 * np.pi:20j]
+for k in range(3):
+    tg_b = np.linspace(tds[k], tds[k] + tfs[k], 30)
+    bp = uav0[None, :] + sp * tg_b[:, None] * np.array([np.cos(th), np.sin(th), 0.0])[None, :]
+    bp[:, 2] -= 0.5 * 9.8 * (tg_b - tds[k]) ** 2
+    ax.plot(bp[:, 0], bp[:, 1], bp[:, 2], color='orange', lw=1.5)
+    ax.scatter(*Bs[k], color='orange', marker='*', s=100)
+    tt = 0.5 * (ivs_each[k][0][0] + ivs_each[k][-1][1]) if ivs_each[k] else tbs[k]
+    cc = np.array(Bs[k]) - np.array([0, 0, 3.0 * (tt - tbs[k])])
+    ax.plot_surface(cc[0] + 10 * np.sin(phi) * np.cos(theta_g), cc[1] + 10 * np.sin(phi) * np.sin(theta_g),
+                    cc[2] + 10 * np.cos(phi), alpha=0.15, color='royalblue')
+ax.scatter(0, 0, 0, color='k', marker='s', s=60, label='假目标')
+TH_, ZZ_ = np.meshgrid(np.linspace(0, 2 * np.pi, 40), np.linspace(0, 10, 3))
+ax.plot_surface(7 * np.cos(TH_), 200 + 7 * np.sin(TH_), ZZ_, alpha=0.5, color='slategray')
+ax.set_xlabel('x / m'); ax.set_ylabel('y / m'); ax.set_zlabel('z / m'); ps.equal3d(ax)
+ax.set_title(f'问题3最优策略 3D 场景（3弹并集 τ={tau_ref:.3f}s）'); ax.legend(loc='upper left', fontsize=9)
+ps.save(fig, 'q3_traj_3d.png')
+
+# 图2 遮蔽区间时间轴
+fig, ax = plt.subplots(figsize=(9, 3.4))
+for k in range(3):
+    for a, b in ivs_each[k]:
+        ax.barh(2 - k, b - a, left=a, height=0.4, color=['crimson', 'darkorange', 'purple'][k], alpha=0.8)
+uni = []
+for a, b in sorted(alliv):
+    if uni and a <= uni[-1][1]:
+        uni[-1][1] = max(uni[-1][1], b)
+    else:
+        uni.append([a, b])
+for a, b in uni:
+    ax.barh(-0.7, b - a, left=a, height=0.35, color='steelblue')
+    ax.text((a + b) / 2, -0.7, f'{b - a:.2f}', ha='center', va='center', color='w', fontsize=9)
+ax.set_yticks([-0.7, 0, 1, 2])
+ax.set_yticklabels([f'并集 τ={tau_ref:.2f}s', '弹1', '弹2', '弹3'])
+ax.set_xlabel('时间 t / s')
+ax.set_title('问题3：各弹遮蔽区间与并集')
+ps.save(fig, 'q3_interval.png')
+
+# 图3 收敛
+fig, ax = plt.subplots(figsize=(7, 4))
+ax.plot(-hist_best, lw=1.5, color='crimson')
+ax.set_xlabel('NM 迭代次数'); ax.set_ylabel('当前最优并集 τ / s')
+ax.set_title(f'问题3：联合 NM 收敛曲线（起点类型：{kind}）')
+ps.save(fig, 'q3_converge.png')
+
+# 图4 递进对比（1弹 vs 3弹）
+fig, ax = plt.subplots(figsize=(6, 3.8))
+q1_tau, q2_tau = 1.391646, 4.559136
+bars = ax.bar(['问题1\n(给定参数)', '问题2\n(1弹最优)', '问题3\n(3弹并集)'], [q1_tau, q2_tau, tau_ref],
+              color=['gray', 'steelblue', 'crimson'], width=0.5)
+for b_, v in zip(bars, (q1_tau, q2_tau, tau_ref)):
+    ax.text(b_.get_x() + b_.get_width() / 2, v + 0.06, f'{v:.3f}s', ha='center', fontsize=11)
+ax.set_ylabel('有效遮蔽时长 / s'); ax.set_ylim(0, tau_ref * 1.2)
+ax.set_title('问题1→2→3：遮蔽时长递进（体判据口径）')
+ps.save(fig, 'q3_progress.png')
+
+# ================= result1.xlsx =================
+import openpyxl
+src = r"D:/pdf/国赛/国赛历年真题/2025年赛题/A题/附件/result1.xlsx"
+wb = openpyxl.load_workbook(src)
+ws = wb.active
+for k in range(3):
+    r = 2 + k    # 数据从第2行（模板第1行表头）
+    Pd = uav0 + sp * tds[k] * np.array([np.cos(th), np.sin(th), 0.0])
+    ws.cell(row=r, column=1, value=round(hd, 2))
+    ws.cell(row=r, column=2, value=round(sp, 2))
+    ws.cell(row=r, column=3, value=k + 1)
+    ws.cell(row=r, column=4, value=round(Pd[0], 2))
+    ws.cell(row=r, column=5, value=round(Pd[1], 2))
+    ws.cell(row=r, column=6, value=round(Pd[2], 2))
+    ws.cell(row=r, column=7, value=round(Bs[k][0], 2))
+    ws.cell(row=r, column=8, value=round(Bs[k][1], 2))
+    ws.cell(row=r, column=9, value=round(Bs[k][2], 2))
+    ws.cell(row=r, column=10, value=round(union_length(ivs_each[k]), 3))
+out = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'results', 'result1.xlsx')
+wb.save(out)
+print(f"\n[result1.xlsx 已生成] {out}（有效干扰时长=各弹单独遮蔽时长；并集 {tau_ref:.3f}s 在正文报告）")
+
+# 结果表
+tabs = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'output', 'tables')
+with open(os.path.join(tabs, 'q3_result.md'), 'w', encoding='utf-8') as f:
+    f.write("# 问题3 结果\n\n| 量 | 数值 |\n|---|---|\n")
+    f.write(f"| 航向角 θ (°) | {hd:.4f} |\n| 速度 v (m/s) | {sp:.4f} |\n")
+    for k in range(3):
+        Pd = uav0 + sp * tds[k] * np.array([np.cos(th), np.sin(th), 0.0])
+        f.write(f"| 弹{k+1} 投放时刻/起爆时刻 (s) | {tds[k]:.4f} / {tbs[k]:.4f} |\n")
+        f.write(f"| 弹{k+1} 投放点 (m) | ({Pd[0]:.2f}, {Pd[1]:.2f}, {Pd[2]:.2f}) |\n")
+        f.write(f"| 弹{k+1} 起爆点 (m) | ({Bs[k][0]:.2f}, {Bs[k][1]:.2f}, {Bs[k][2]:.2f}) |\n")
+        f.write(f"| 弹{k+1} 单独遮蔽时长 (s) | {union_length(ivs_each[k]):.4f} |\n")
+    f.write(f"| **三弹并集有效遮蔽时长 (s)** | **{tau_ref:.3f}** |\n")
+
+t_g0 = time.time() - tC - t_val
+print(f"[计时] 粗扫{t_scan:.1f}s + NM{t_nm:.1f}s + 验证{t_val:.1f}s + G0扫描{t_g0:.1f}s = 总 {time.time() - T0:.1f}s")
+print(f"[G-Cost 预算核对] 粗扫{n_eval}次评估（≤3万）✓  求解主链 {t_scan + t_nm:.1f}s")

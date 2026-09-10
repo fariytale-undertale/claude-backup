@@ -1,0 +1,116 @@
+# -*- coding: utf-8 -*-
+"""论文素材 v2：流程图 + 程序化生成 LaTeX 表格（无嵌套 tabular，环境兼容版）"""
+import json
+
+import pandas as pd
+
+import figs as fg
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
+
+ROOT = r"D:/z_data/.zcode/workspace/default/2023A"
+OUT = f"{ROOT}/paper"
+
+# ---------- 流程图（分层逻辑流：决策变量层→几何建模层→效率函数层→分问题求解→输出） ----------
+fig, ax = fg.plt.subplots(figsize=(12.8, 4.6))
+ax.set_xlim(0, 160)
+ax.set_ylim(0, 62)
+ax.axis("off")
+
+
+def gbox(x0, y0, x1, y1, label):
+    ax.add_patch(FancyBboxPatch((x0, y0), x1 - x0, y1 - y0, boxstyle="round,pad=0.4",
+                                fc="#fdf1e3", ec="k", lw=1.1, linestyle="--"))
+    ax.text((x0 + x1) / 2, y1 - 3.0, label, ha="center", va="center",
+            fontsize=10.5, weight="bold")
+
+
+def box(x0, y0, x1, y1, label, fc="white", fs=9.0):
+    ax.add_patch(FancyBboxPatch((x0, y0), x1 - x0, y1 - y0, boxstyle="round,pad=0.3",
+                                fc=fc, ec="k", lw=0.9))
+    ax.text((x0 + x1) / 2, (y0 + y1) / 2, label, ha="center", va="center", fontsize=fs)
+
+
+def arrow(x0, y0, x1, y1, label=None, lx=0.0, ly=1.8):
+    ax.add_patch(FancyArrowPatch((x0, y0), (x1, y1), arrowstyle="-|>",
+                                 mutation_scale=15, color="k", lw=1.2))
+    if label:
+        ax.text((x0 + x1) / 2 + lx, (y0 + y1) / 2 + ly, label, ha="center", va="bottom",
+                fontsize=9.2)
+
+
+# 层 1：设定决策变量
+gbox(2, 3, 30, 58, "设定决策变量")
+box(4, 47, 28, 53, "问题一：附件给定布局")
+box(4, 38, 28, 44, "问题二：吸收塔位置")
+box(4, 29, 28, 35, "统一尺寸与安装高度")
+box(4, 20, 28, 26, "问题二：行网格间距")
+box(4, 11, 28, 17, "问题三：分带宽×高")
+# 层 2：通用几何建模
+gbox(37, 19, 63, 58, "通用几何建模")
+box(39, 44, 61, 50, "太阳位置与 DNI")
+box(39, 33, 61, 39, "镜面法向与四角点")
+box(39, 22, 61, 28, "子格划分 12×12")
+# 层 3：效率判定函数
+gbox(70, 12, 97, 58, "效率判定函数")
+box(72, 46, 95, 52, "余弦效率")
+box(72, 33, 95, 41, "阴影遮挡：光线-矩形求交")
+box(72, 20, 95, 27, "截断：束锥卷积积分")
+# 年均目标函数（中央节点）
+box(103, 29, 124, 41, "60 时点年平均效率\n与输出热功率 E、u", fc="#fff2cc", fs=9.4)
+# 分问题求解分支
+box(129, 48, 146, 56, "输入附件给定布局", fc="#e2f0e0", fs=8.6)
+box(129, 30, 146, 40, "行网格粗扫+坐标下降\n+随机基线", fc="#e2f0e0", fs=8.6)
+box(129, 10, 146, 19, "分带尺寸坐标下降", fc="#e2f0e0", fs=8.6)
+# 输出
+box(150, 29, 159, 41, "输出\n结果", fc="#dbe9f9", fs=9.4)
+# 层间箭头
+arrow(30, 31, 37, 37)
+arrow(63, 37, 70, 36)
+arrow(97, 36, 103, 36)
+# 分支箭头（标注问题号）
+arrow(124, 37, 129, 52, "问题 1", lx=-2.2)
+arrow(124, 36, 129, 35, "问题 2", lx=0.0, ly=0.6)
+arrow(124, 33, 129, 14.5, "问题 3", lx=-2.2, ly=-3.4)
+# 分支→输出
+arrow(146, 52, 152, 41)
+arrow(146, 35, 150, 35)
+arrow(146, 14.5, 152, 29)
+fg.save(fig, "global_flow.png")
+
+
+# ---------- 表格（无嵌套 tabular） ----------
+def table1_tex(csv, fout):
+    d = pd.read_csv(csv)
+    if "month" in d.columns:
+        d = d.rename(columns={"month": "日期"})
+    col = "单位面积镜面平均输出热功率(kW/m2)"
+    lines = ["日期 & 平均光学效率 & 平均余弦效率 & 平均阴影遮挡效率 & 平均截断效率 & 单位面积输出/(kW/m2) \\\\"]
+    for _, r in d.iterrows():
+        lines.append(f"{r['日期']} & {r['平均光学效率']:.4f} & {r['平均余弦效率']:.4f} & "
+                     f"{r['平均阴影遮挡效率']:.4f} & {r['平均截断效率']:.4f} & {r[col]:.4f} \\\\")
+    with open(fout, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print("wrote", fout)
+
+
+def table2_tex(csv, fout):
+    d = pd.read_csv(csv).iloc[0]
+    rows = [("年平均光学效率", f"{d['年平均光学效率']:.4f}"),
+            ("年平均余弦效率", f"{d['年平均余弦效率']:.4f}"),
+            ("年平均阴影遮挡效率", f"{d['年平均阴影遮挡效率']:.4f}"),
+            ("年平均截断效率", f"{d['年平均截断效率']:.4f}"),
+            ("年平均输出热功率/MW", f"{d['年平均输出热功率(MW)']:.4f}"),
+            ("单位面积镜面年平均输出热功率/(kW/m2)", f"{d['单位面积镜面年平均输出热功率(kW/m2)']:.4f}")]
+    lines = ["指标 & 数值 \\\\"]
+    lines += [f"{k} & {v} \\\\" for k, v in rows]
+    with open(fout, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print("wrote", fout)
+
+
+table1_tex(f"{ROOT}/output/tables/q1_table1.csv", f"{OUT}/tab_q1_m.tex")
+table2_tex(f"{ROOT}/output/tables/q1_table2.csv", f"{OUT}/tab_q1_a.tex")
+table1_tex(f"{ROOT}/output/tables/q2_table1.csv", f"{OUT}/tab_q2_m.tex")
+table2_tex(f"{ROOT}/output/tables/q2_table2.csv", f"{OUT}/tab_q2_a.tex")
+table1_tex(f"{ROOT}/output/tables/q3_table1.csv", f"{OUT}/tab_q3_m.tex")
+table2_tex(f"{ROOT}/output/tables/q3_table2.csv", f"{OUT}/tab_q3_a.tex")

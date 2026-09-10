@@ -1,0 +1,16 @@
+#include <iostream>
+
+// 定义命名空间，避免全局命名冲突
+namespace Chassis {
+    int motorSpeed = 100;
+}
+
+namespace Gimbal {
+    int motorSpeed = 200;
+}
+
+int main() {
+    std::cout << "底盘电机速度: " << Chassis::motorSpeed << std::endl;
+    std::cout << "云台电机速度: " << Gimbal::motorSpeed << std::endl;
+    return 0;
+}

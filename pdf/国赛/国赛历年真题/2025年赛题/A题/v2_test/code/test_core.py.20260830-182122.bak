@@ -1,0 +1,119 @@
+# -*- coding: utf-8 -*-
+"""G4 首写验证：手验案例 + 双判据区分性测试（跨抽象层）。
+
+每个测试先给出手算预期，脚本 print 断言。
+"""
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import numpy as np
+from core import (G, R_CLOUD, SINK, T_EFF, V_MISSILE, MISSILES, UAVS, T_HIT,
+                  uav_pos, drop_pos, burst_pos, cloud_center, missile_pos,
+                  cyl_samples, CENTER_PT, CYL_PTS, dist2_cloud_to_seg,
+                  shaded_intervals, shaded_intervals_point, union_length,
+                  grid_union_length)
+from scipy.optimize import brentq
+
+ok_all = True
+
+def check(name, cond, detail=""):
+    global ok_all
+    status = "PASS" if cond else "FAIL"
+    if not cond:
+        ok_all = False
+    print(f"[{status}] {name}  {detail}")
+
+print("=" * 72)
+print("T1 方向向量符号：M1 速度方向应指向原点（朝假目标）")
+e_m1 = -MISSILES['M1'] / np.linalg.norm(MISSILES['M1'])
+p0, p10 = MISSILES['M1'], missile_pos('M1', 10.0)
+d = p10 - p0
+check("T1a M1 朝原点方向", np.linalg.norm(d - V_MISSILE * 10.0 * e_m1) < 1e-9)
+check("T1b M1 靠近原点", np.linalg.norm(p10) < np.linalg.norm(p0),
+      f"|p0|={np.linalg.norm(p0):.1f} |p10|={np.linalg.norm(p10):.1f}")
+check("T1c M1 轨迹过原点", np.linalg.norm(missile_pos('M1', T_HIT['M1'])) < 1e-6,
+      f"t_hit={T_HIT['M1']:.4f}s")
+
+print("-" * 72)
+print("T2 无人机运动：等高度（z 恒定），水平面内匀速")
+p = uav_pos('FY1', 5.0, 0.0, 120.0)
+check("T2a z 恒为 1800", abs(p[2] - 1800.0) < 1e-9, f"z={p[2]}")
+check("T2b x 位移=120*5", abs(p[0] - (17800.0 + 600.0)) < 1e-9)
+
+print("-" * 72)
+print("T3 平抛：起爆点 = 投放点 + 水平初速位移 - 重力下坠")
+d_ = drop_pos('FY1', 1.5, 0.0, 120.0)
+b_ = burst_pos('FY1', 1.5, 3.6, 0.0, 120.0)
+dz = b_[2] - d_[2]
+check("T3a 下坠 0.5*g*tau^2", abs(dz + 0.5 * G * 3.6 ** 2) < 1e-9, f"dz={dz:.4f}")
+check("T3b 水平位移 v*tau", abs((b_[0] - d_[0]) - 120.0 * 3.6) < 1e-9)
+
+print("-" * 72)
+print("T4 点到线段距离（含端点 clamp）三案例")
+# 案例 a：垂足在线段内
+m, p = np.array([0., 0., 0.]), np.array([10., 0., 0.])
+c = np.array([5., 3., 0.])
+check("T4a 垂足在内", abs(dist2_cloud_to_seg(c[None], m, p)[0] - 9.0) < 1e-12, "expect 9")
+# 案例 b：垂足在延长线上（clamp 到端点）
+c2 = np.array([15., 4., 0.])
+check("T4b clamp 到端点", abs(dist2_cloud_to_seg(c2[None], m, p)[0] - 41.0) < 1e-12, "expect 41")
+# 案例 c：云心恰在线段上 -> 0
+c3 = np.array([7., 0., 0.])
+check("T4c 云心在线段上", dist2_cloud_to_seg(c3[None], m, p)[0] < 1e-12)
+
+print("-" * 72)
+print("T5 双判据区分性测试（跨抽象层）")
+# 构造：云心紧贴 柱心 视线，但离 圆柱侧面点 很远 → 点判据=遮蔽、体判据=不遮蔽
+# 几何：导弹 M1 在 t=30s；云心放在 导弹->柱心 连线的中点附近，半径 10 内、
+#       但目标背面（y=200 侧）采样点距视线 > 10m
+t = 30.0
+m30 = missile_pos('M1', 30.0)
+# 视线参数化 L(s) = m30 + s*(CENTER - m30)；取 s=0.5 的点
+L_mid = m30 + 0.5 * (CENTER_PT - m30)
+# 视线长度 ~ |m30-CENTER| ≈ sqrt(19999^2+1972.5^2+1995^2)（远>2*R），半程处垂距为0
+d2_center = dist2_cloud_to_seg(L_mid[None], m30, CENTER_PT)[0]
+d2_side = np.array([dist2_cloud_to_seg(L_mid[None], m30, p)[0] for p in CYL_PTS]).max()
+print(f"    云心=半程视线点: 到柱心视线 d^2={d2_center:.3f}, 到最远侧面点 d^2={d2_side:.3f}")
+check("T5a 点判据遮蔽(d^2<=100)", d2_center <= 100.0)
+check("T5b 体判据不遮蔽(max d^2>100)", d2_side > 100.0,
+      f"侧面最远点距视线 {np.sqrt(d2_side):.2f} m > 10 m")
+# 跨抽象层区分性成立：同一云心位置，点判据判遮蔽、体判据判不遮蔽——两判据给出不同答案。
+check("T5c 区分性成立(点判遮蔽∧体判不遮蔽)", d2_center <= 100.0 and d2_side > 100.0)
+
+print("-" * 72)
+print("T6 区间求根 vs 细网格互证（G2 异源校验）：构造一个已知遮蔽场景")
+# 用问题1的策略做互证
+theta_q1 = np.arctan2(0.0 - 0.0, 0.0 - 17800.0)  # 朝假目标 = -x 方向 = pi
+b_q1 = burst_pos('FY1', 1.5, 3.6, np.pi, 120.0)
+tb_q1 = 1.5 + 3.6
+ivs_body = shaded_intervals(b_q1, tb_q1, 'M1', CYL_PTS, T_HIT['M1'])
+ivs_pt = shaded_intervals_point(b_q1, tb_q1, 'M1', T_HIT['M1'])
+dur_body = union_length(ivs_body)
+dur_pt = union_length(ivs_pt)
+dur_grid, _ = grid_union_length([(b_q1, tb_q1)], 'M1', CYL_PTS, T_HIT['M1'], dt=0.0005)
+print(f"    体判据 解析={dur_body:.6f}s  网格(dt=5e-4)={dur_grid:.6f}s  差={abs(dur_body-dur_grid):.2e}")
+check("T6a 解析-网格一致(<5e-4)", abs(dur_body - dur_grid) < 6e-4)
+check("T6b 区间数<=2", len(ivs_body) <= 2, f"n={len(ivs_body)}, ivs={[(round(a,3),round(b,3)) for a,b in ivs_body]}")
+print(f"    点判据={dur_pt:.6f}s  体判据={dur_body:.6f}s  差异={dur_pt-dur_body:+.4f}s")
+
+print("-" * 72)
+print("T7 采样密度敏感性（体判据内部收敛）")
+for (nt, nz) in [(12, 2), (24, 3), (48, 5), (96, 9)]:
+    pts = cyl_samples(n_theta=nt, n_z=nz)
+    ivs = shaded_intervals(b_q1, tb_q1, 'M1', pts, T_HIT['M1'])
+    print(f"    采样 {nt}x{nz}: 时长={union_length(ivs):.6f}s")
+
+print("-" * 72)
+print("T8 云团触地监控（P5）：问题1 云团最低点 z")
+# 起爆后 20s 内最低 z
+t_end = min(tb_q1 + T_EFF, T_HIT['M1'])
+zmin = burst_pos('FY1', 1.5, 3.6, np.pi, 120.0)[2] - SINK * (t_end - tb_q1)
+check("T8a 云团未触地", zmin > 0.0, f"zmin={zmin:.1f} m")
+
+print("-" * 72)
+print("T9 t_hit 裁剪生效：窗口右端 = min(t_b+20, t_hit)")
+check("T9a t_hit(M1)≈66.9s 且窗口被裁剪", abs(T_HIT['M1'] - np.sqrt(20000**2 + 2000**2) / 300.0) < 1e-12
+      and min(tb_q1 + T_EFF, T_HIT['M1']) == T_HIT['M1'],
+      f"t_b+20={tb_q1+T_EFF:.1f}, t_hit={T_HIT['M1']:.3f} -> 未裁剪(窗口更短一侧生效)")
+
+print("=" * 72)
+print("全部测试:", "PASS" if ok_all else "FAIL")

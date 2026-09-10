@@ -1,0 +1,118 @@
+# -*- coding: utf-8 -*-
+"""建模准备用图：总体思路流程图 + 系统示意图（螺线/把手/板凳/调头空间）。"""
+import numpy as np
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from figures_common import save_fig
+import matplotlib.pyplot as plt
+from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, Rectangle
+from dragon_core import spiral_point, spiral_b
+
+# ============ 图A：总体思路流程图 ============
+fig, ax = plt.subplots(figsize=(9.6, 7.0))
+ax.set_xlim(0, 100)
+ax.set_ylim(0, 100)
+ax.axis("off")
+
+C_IN = "#dbe9f6"; C_CORE = "#aed0ee"; C_Q = "#fde3c8"; C_M = "#e2efda"; C_OUT = "#f2dcdb"
+EC = "#4472a8"
+
+
+def box(x, y, w, h, text, fc, fs=10.5, lw=1.2):
+    ax.add_patch(FancyBboxPatch((x - w / 2, y - h / 2), w, h,
+                                boxstyle="round,pad=0.6", fc=fc, ec=EC, lw=lw))
+    ax.text(x, y, text, ha="center", va="center", fontsize=fs, linespacing=1.45)
+
+
+def arrow(x0, y0, x1, y1):
+    ax.add_patch(FancyArrowPatch((x0, y0), (x1, y1), arrowstyle="-|>",
+                                 mutation_scale=13, color=EC, lw=1.2))
+
+
+def line(pts):
+    xs, ys = zip(*pts)
+    ax.plot(xs, ys, color=EC, lw=1.2, solid_capstyle="round")
+
+
+box(50, 93, 66, 7.5, "题设条件：223 节板凳尺寸与铰接方式｜阿基米德螺线（螺距 $p$）\n"
+    "调头空间（半径 4.5 m 的圆）｜把手速度约束（$\\leq 2$ m/s）", C_IN, 10)
+box(50, 76, 72, 9.5, "共享核心：刚性链运动学模型\n"
+    "弧长反解 $S(\\theta)$｜弦长方程逐节求解 $|P(\\theta_k)-P(\\theta_{k+1})|=c_k$\n"
+    "速度线性递推 $\\dot{s}_{k+1}=(u_k\\cdot T_k)/(u_k\\cdot T_{k+1})\\,\\dot{s}_k$", C_CORE, 10.5)
+arrow(50, 89.2, 50, 80.9)
+
+qs = [
+    (11.5, "问题1\n螺线盘入位形\n与速度仿真", "输出 result1"),
+    (30.5, "问题2\n矩形碰撞判据\n终止时刻", "输出 result2"),
+    (50.0, "问题3\n全程裕度判据\n最小螺距", "$p_{\\min}$=0.450338 m"),
+    (69.5, "问题4\n调头曲线几何\n曲线族不变量", "L=13.621245 m"),
+    (88.5, "问题5\n速度线性缩放\n最大速度", "$v_{\\max}$=1.246266 m/s"),
+]
+for x, t, o in qs:
+    box(x, 55, 17.4, 11, t, C_Q, 10)
+    box(x, 34, 17.4, 7.5, o, C_OUT, 9.6)
+    arrow(x, 49.4, x, 37.9)
+
+# 核心到各问分的正交连线
+line([(50, 71.2), (50, 66.5), (11.5, 66.5), (11.5, 60.7)])
+line([(30.5, 66.5), (30.5, 60.7)])
+line([(50, 66.5), (50, 60.7)])
+line([(69.5, 66.5), (69.5, 60.7)])
+line([(88.5, 66.5), (88.5, 60.7), (50, 66.5)])
+
+methods = ("求解方法：Newton 反解与守卫二分（精确）｜包围圆剪枝 + SAT/边-边闭式距离\n"
+           "时间/螺距一维单调求根｜解析刻画先行：弧长公式、速度方向命题、曲线族不变量")
+box(50, 20, 86, 8, methods, C_M, 10)
+for x, _, _ in qs:
+    line([(x, 30.2), (x, 26.5)])
+arrow(50, 15.8, 50, 24.2 - 8 + 0)  # placeholder no-op
+line([(50, 16), (50, 16)])
+arrow(50, 20 - 4.2, 50, 20 - 4.2)
+ax.add_patch(FancyArrowPatch((50, 15.9), (50, 15.9), arrowstyle="-"))
+box(50, 8, 60, 7, "检验体系：区分性测试（直线/圆周退化、双判据分叉案例）\n"
+    "差分互证｜独立数值路径复算｜直径 ±10% 与分辨率敏感性", C_M, 9.8)
+arrow(50, 15.8, 50, 11.7)
+save_fig(fig, "fig_flow.png")
+
+# ============ 图B：系统示意图 ============
+fig, ax = plt.subplots(figsize=(7.6, 7.6))
+b = spiral_b(0.55)
+th = np.linspace(1e-6, 32 * np.pi, 5000)
+r = b * th
+ax.plot(r * np.cos(th), r * np.sin(th), color="#9ab8d8", lw=0.9, label="盘入螺线（螺距 0.55 m）")
+# 把手点（示意：t=0 位形的前 60 个把手）
+from dragon_core import Spiral, ReversedPath, walk_chain, chain_points, S_arc
+rp = ReversedPath(Spiral(0.55))
+mu = walk_chain(rp, np.array([-float(S_arc(32 * np.pi, b))]))
+X = chain_points(rp, mu)[0]
+ax.plot(X[:, 0], X[:, 1], "o", ms=2.8, color="#1f77b4", label="把手中心（224 个，均位于螺线上）")
+# 龙头板凳矩形放大显示
+from dragon_core import bench_rects
+R = bench_rects(X)
+poly = np.vstack([R[0], R[0][0]])
+ax.fill(poly[:, 0], poly[:, 1], color="#d62728", alpha=0.30)
+ax.plot(poly[:, 0], poly[:, 1], color="#d62728", lw=1.3, label="龙头板凳（矩形，宽 0.30 m）")
+ax.plot([8.8], [0], "k*", ms=11)
+ax.annotate("A（龙头前把手起点，$r=16\\times p=8.8$ m）", (8.8, 0),
+            textcoords="offset points", xytext=(8, -14), fontsize=9)
+circ = plt.Circle((0, 0), 4.5, fill=False, color="#2ca02c", ls="--", lw=1.3,
+                  label="调头空间边界（半径 4.5 m）")
+ax.add_patch(circ)
+ax.plot(0, 0, "k+", ms=10)
+ax.annotate("O", (0.15, 0.35), fontsize=10)
+ax.set_aspect("equal")
+ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
+ax.set_xlim(-13, 13); ax.set_ylim(-13, 13)
+ax.set_title("板凳龙系统示意：螺线轨道、把手链、板凳矩形与调头空间")
+ax.legend(fontsize=8.5, loc="upper left")
+save_fig(fig, "fig_schema.png")
+
+# ============ Q4 论文表数值提取 ============
+import openpyxl
+wb = openpyxl.load_workbook(os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "output", "tables", "q4_paper_table.xlsx"), data_only=True)
+for ws in wb.worksheets:
+    print("==", ws.title)
+    for row in ws.iter_rows(values_only=True):
+        print(" | ".join("" if v is None else (f"{v:.6f}" if isinstance(v, float) else str(v))
+                         for v in row))

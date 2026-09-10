@@ -1,0 +1,105 @@
+# -*- coding: utf-8 -*-
+"""跨问一致性检验（全局自检第一部分）：
+① 共享子问题数值互证 ② result1/2/3.xlsx 回读复算（舍入容差）③ 物理窗口约束 ④ 单位量级。"""
+import numpy as np
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import openpyxl
+from common import (UAVS, MISSILES, target_samples, shading_intervals, union_length,
+                    burst_point, T_FUSE_MIN, T_END)
+
+SAMPLES_V = target_samples(48, 4)   # 独立验证网格（与各问求解网格不同）
+ok = True
+
+def check(name, cond, detail=""):
+    global ok
+    print(f"[{'PASS' if cond else 'FAIL'}] {name} {detail}")
+    if not cond:
+        ok = False
+
+def tau_of_params(uav_name, hd, sp, td, tf, mis):
+    iv, _, _ = shading_intervals(UAVS[uav_name], hd, sp, td, tf, mis, dt=0.02,
+                                 samples=SAMPLES_V, criterion='body')
+    return union_length(iv), iv
+
+print("==== ① 共享子问题互证 ====")
+# Q2 单弹最优 vs Q4 中 FY1 分量（同为 FY1 单弹对 M1 的个体最优）
+q2_tau, _ = tau_of_params('FY1', 7.8088, 70.000, 0.0287, 1.0005, 'M1')
+q4_fy1_tau, _ = tau_of_params('FY1', 7.996, 70.02, 0.1034, 1.0500, 'M1')
+check("Q2 vs Q4·FY1 单弹值一致", abs(q2_tau - q4_fy1_tau) < 0.05,
+      f"Q2={q2_tau:.4f}s, Q4·FY1={q4_fy1_tau:.4f}s, 差={abs(q2_tau-q4_fy1_tau):.4f}s")
+# Q3 并集复算
+iv1_q3, _, _ = shading_intervals(UAVS['FY1'], 179.406, 124.74, 0.3454, 3.7717, 'M1',
+                                 dt=0.02, samples=SAMPLES_V, criterion='body')
+iv2, _, _ = shading_intervals(UAVS['FY1'], 179.406, 124.74, 3.0507, 4.7029, 'M1',
+                              dt=0.02, samples=SAMPLES_V, criterion='body')
+iv3, _, _ = shading_intervals(UAVS['FY1'], 179.406, 124.74, 6.4095, 6.6362, 'M1',
+                              dt=0.02, samples=SAMPLES_V, criterion='body')
+q3_union = union_length([(a, b) for a, b in iv1_q3] + [(a, b) for a, b in iv2] + [(a, b) for a, b in iv3])
+check("Q3 并集复算=6.136", abs(q3_union - 6.136478) < 0.01, f"复算={q3_union:.4f}s")
+# Q4 并集复算（三机）
+q4_part = tau_of_params('FY1', 7.996, 70.02, 0.1034, 1.0500, 'M1')[0]
+q4_fy2, _ = tau_of_params('FY2', 269.201, 136.02, 3.6076, 6.2924, 'M1')
+q4_fy3, _ = tau_of_params('FY3', 143.600, 138.00, 28.25, 10.30, 'M1')
+check("Q4 并集复算=10.547", abs(q4_part + q4_fy2 + q4_fy3 - 10.546996) < 0.02,
+      f"复算={q4_part + q4_fy2 + q4_fy3:.4f}s (FY2={q4_fy2:.3f}, FY3={q4_fy3:.3f})")
+
+print("\n==== ② result.xlsx 回读复算 ====")
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def read_result(path, col_u, col_td, col_bz, col_mis, default_u='FY1'):
+    """列布局因模板而异：result1 无编号列；result2 无弹编号列；result3 全列。
+    返回 (uav, hd, sp, td, Bz, mis)。"""
+    wb = openpyxl.load_workbook(path)
+    ws = wb.active
+    out = []
+    for r in range(2, ws.max_row + 1):
+        u = ws.cell(row=r, column=col_u).value if col_u else default_u
+        hd = ws.cell(row=r, column=2).value
+        if hd is None:
+            continue
+        if u is None or not str(u).startswith('FY'):
+            continue
+        out.append((str(u), float(hd), float(ws.cell(row=r, column=3).value),
+                    float(ws.cell(row=r, column=col_td).value),
+                    float(ws.cell(row=r, column=col_bz).value),
+                    ws.cell(row=r, column=col_mis).value if col_mis else 'M1'))
+    return out
+
+def union_from_rows(rows, mis_all=None):
+    ivs = []
+    for (u, hd, sp, td, Bz, mis) in rows:
+        tf = np.sqrt(max((UAVS[u][2] - Bz) / (0.5 * 9.8), 1e-9))
+        iv, _, _ = shading_intervals(UAVS[u], hd, sp, td, tf, mis, dt=0.02,
+                                     samples=SAMPLES_V, criterion='body')
+        ivs.append((mis, iv))
+    return ivs
+
+rows1 = read_result(os.path.join(BASE, 'results', 'result1.xlsx'), None, 4, 9, None)
+t1 = union_length([seg for _, iv in union_from_rows(rows1) for seg in iv])
+check("result1.xlsx 回读并集 ≈ 6.136", abs(t1 - 6.136478) < 0.05, f"回读复算={t1:.4f}s（舍入参数）")
+
+rows2 = read_result(os.path.join(BASE, 'results', 'result2.xlsx'), 1, 4, 9, None)
+t2 = union_length([seg for _, iv in union_from_rows(rows2) for seg in iv])
+check("result2.xlsx 回读并集 ≈ 10.547", abs(t2 - 10.546996) < 0.05, f"回读复算={t2:.4f}s（舍入参数）")
+
+p3 = os.path.join(BASE, 'results', 'result3.xlsx')
+if os.path.exists(p3):
+    rows3 = read_result(p3, 1, 5, 10, 12)
+    per = {}
+    for mis, iv in union_from_rows(rows3):
+        per.setdefault(mis, []).extend(iv)
+    t3 = sum(union_length(v) for v in per.values())
+    print(f"  result3.xlsx 回读复算总量 = {t3:.4f}s（与最终记录对照，容差 0.05s）")
+
+print("\n==== ③ 物理窗口约束 ====")
+for name, rows in (("result1", rows1), ("result2", rows2)):
+    for (u, hd, sp, td, Bz, mis) in rows:
+        tf_rec = np.sqrt(max((UAVS[u][2] - Bz) / 4.9, 0))
+        check(f"{name} {u} td≥0, tf≥1", td >= 0 and tf_rec >= T_FUSE_MIN - 1e-3,
+              f"td={td:.3f} tf={tf_rec:.3f}")
+check("导弹到达时间窗口", all(60 < T_END[m] < 68 for m in ('M1', 'M2', 'M3')),
+      f"M1={T_END['M1']:.2f} M2={T_END['M2']:.2f} M3={T_END['M3']:.2f}")
+
+print("\n==== 总结:", "全部通过" if ok else "存在失败项", "====")
+sys.exit(0 if ok else 1)

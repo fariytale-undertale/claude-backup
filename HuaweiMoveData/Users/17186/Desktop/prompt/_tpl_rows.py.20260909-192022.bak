@@ -1,0 +1,38 @@
+# -*- coding: utf-8 -*-
+"""模板 3.6 检查清单（三列表格）追加三行：以"符号表完整性"所在行为结构模板。"""
+import io
+import re
+
+DOC = r"D:/HuaweiMoveData/Users/17186/Desktop/prompt/_tpl_tmp/word/document.xml"
+s = io.open(DOC, encoding="utf-8").read()
+
+key = "符号表完整性"
+i = s.index(key)
+tr_start = s.rindex("<w:tr", 0, i)
+tr_end = s.index("</w:tr>", i) + len("</w:tr>")
+row_tpl = s[tr_start:tr_end]
+
+texts = re.findall(r"<w:t[^>]*>([^<]*)</w:t>", row_tpl)
+assert len(texts) == 3, f"模板行含 {len(texts)} 个文本节点: {texts}"
+
+
+def make_row(cells):
+    r = row_tpl
+    for old, new in zip(texts, cells):
+        r = r.replace(">" + old + "<", ">" + new + "<", 1)
+    return r
+
+
+NEW_ROWS = [
+    ("题面歧义登记表",
+     "开题逐条登记题面语义歧义（量词是否取等、约束对象为点还是体、时间与单位基准、成对约束的推广口径），采用解释与依据写入假设，关键歧义补分支敏感性"),
+    ("口径一致",
+     "跨问/跨表对比前统一保真度等口径：先统一重算再比较，仅加标注不算完成"),
+    ("派生数字可复算",
+     "用论文展示的表值能复算正文派生结论（差不超过正文末位半个单位）；决策相关数字提高展示精度，不敏感数字降粗表述"),
+]
+
+block = "".join(make_row(cells) for cells in NEW_ROWS)
+s = s[:tr_end] + block + s[tr_end:]
+io.open(DOC, "w", encoding="utf-8", newline="").write(s)
+print("3 rows inserted; row texts were:", texts)

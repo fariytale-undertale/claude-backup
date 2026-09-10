@@ -1,0 +1,77 @@
+# -*- coding: utf-8 -*-
+"""论文素材 v2：流程图 + 程序化生成 LaTeX 表格（无嵌套 tabular，环境兼容版）"""
+import json
+
+import pandas as pd
+
+import figs as fg
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
+
+ROOT = r"D:/z_data/.zcode/workspace/default/2023A"
+OUT = f"{ROOT}/paper"
+
+# ---------- 流程图 ----------
+fig, ax = fg.plt.subplots(figsize=(10.8, 2.9))
+ax.axis("off")
+boxes = [
+    ("问题一\n矩形镜几何光学模型", "太阳位置/DNI 解析式\n60 时点效率链评估\n遮挡(子格光线求交)\n截断(束锥卷积积分)"),
+    ("问题二\n行网格布局族优化", "决策变量: 塔位/尺寸/安装高\n/数目/位置\n约束: 额定 60 MW + 间距/边界\n粗扫+坐标下降+随机基线"),
+    ("问题三\n分带异尺寸扩展", "6 个 y 向分带独立 (宽,高)\n带内 pitch 随宽度自适应\n继承问题二引擎与框架"),
+]
+cols = ["#dbe9f9", "#fde9d9", "#e2f0e0"]
+xw = [0.30, 0.32, 0.30]
+x = 0.015
+centers = []
+for (t1, t2), c, w in zip(boxes, cols, xw):
+    ax.add_patch(FancyBboxPatch((x, 0.08), w, 0.84, boxstyle="round,pad=0.012",
+                                fc=c, ec="k", lw=1.0, transform=ax.transAxes))
+    ax.text(x + w / 2, 0.78, t1, ha="center", va="center", fontsize=11.5, weight="bold",
+            transform=ax.transAxes)
+    ax.text(x + w / 2, 0.40, t2, ha="center", va="center", fontsize=9.5, transform=ax.transAxes)
+    centers.append((x, x + w))
+    x += w + 0.035
+for i in range(2):
+    ax.add_patch(FancyArrowPatch((centers[i][1] + 0.004, 0.5), (centers[i + 1][0] - 0.004, 0.5),
+                                 transform=ax.transAxes, arrowstyle="-|>",
+                                 mutation_scale=22, color="k", lw=1.4))
+ax.text(0.5, 0.015, "共享: 太阳位置/DNI 模块、矩形镜遮挡与截断引擎、60 时点年均口径（保证三问数字同源可比）",
+        ha="center", fontsize=9.5, transform=ax.transAxes, style="italic")
+fg.save(fig, "global_flow.png")
+
+
+# ---------- 表格（无嵌套 tabular） ----------
+def table1_tex(csv, fout):
+    d = pd.read_csv(csv)
+    if "month" in d.columns:
+        d = d.rename(columns={"month": "日期"})
+    col = "单位面积镜面平均输出热功率(kW/m2)"
+    lines = ["日期 & 平均光学效率 & 平均余弦效率 & 平均阴影遮挡效率 & 平均截断效率 & 单位面积输出/(kW/m2) \\\\"]
+    for _, r in d.iterrows():
+        lines.append(f"{r['日期']} & {r['平均光学效率']:.4f} & {r['平均余弦效率']:.4f} & "
+                     f"{r['平均阴影遮挡效率']:.4f} & {r['平均截断效率']:.4f} & {r[col]:.4f} \\\\")
+    with open(fout, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print("wrote", fout)
+
+
+def table2_tex(csv, fout):
+    d = pd.read_csv(csv).iloc[0]
+    rows = [("年平均光学效率", f"{d['年平均光学效率']:.4f}"),
+            ("年平均余弦效率", f"{d['年平均余弦效率']:.4f}"),
+            ("年平均阴影遮挡效率", f"{d['年平均阴影遮挡效率']:.4f}"),
+            ("年平均截断效率", f"{d['年平均截断效率']:.4f}"),
+            ("年平均输出热功率/MW", f"{d['年平均输出热功率(MW)']:.4f}"),
+            ("单位面积镜面年平均输出热功率/(kW/m2)", f"{d['单位面积镜面年平均输出热功率(kW/m2)']:.4f}")]
+    lines = ["指标 & 数值 \\\\"]
+    lines += [f"{k} & {v} \\\\" for k, v in rows]
+    with open(fout, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print("wrote", fout)
+
+
+table1_tex(f"{ROOT}/output/tables/q1_table1.csv", f"{OUT}/tab_q1_m.tex")
+table2_tex(f"{ROOT}/output/tables/q1_table2.csv", f"{OUT}/tab_q1_a.tex")
+table1_tex(f"{ROOT}/output/tables/q2_table1.csv", f"{OUT}/tab_q2_m.tex")
+table2_tex(f"{ROOT}/output/tables/q2_table2.csv", f"{OUT}/tab_q2_a.tex")
+table1_tex(f"{ROOT}/output/tables/q3_table1.csv", f"{OUT}/tab_q3_m.tex")
+table2_tex(f"{ROOT}/output/tables/q3_table2.csv", f"{OUT}/tab_q3_a.tex")

@@ -1,0 +1,104 @@
+# -*- coding: utf-8 -*-
+"""问题5：沿问题4 路径行进，龙头速率恒定，求最大行进速度 V_max 使所有把手速度 <=2 m/s。
+原理（P7 缩放引理）：速度场对龙头速率线性齐次 → V_max = 2 / M，M = 全程 max_t max_k |sdot_k|(v0=1)。
+D4 口径：答案按题给 2:1 基线路径；另报最短曲线（问题4 优化）下 V_max 作对比。
+产出：figures/fig_q5_mt.png。"""
+import numpy as np
+import os, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dragon_core import walk_chain_series, chain_points, chain_speeds, chord_residual
+import turn_geom as tg
+from figures_common import save_fig
+import matplotlib.pyplot as plt
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+t_start = time.time()
+V_LIM = 2.0
+
+
+def M_profile(tp, ts, v0=1.0):
+    """各时刻 max_k 速度比。返回 (M, k_argmax, speeds 矩阵)。"""
+    mus = walk_chain_series(tp, ts)
+    X = chain_points(tp, mus)
+    res = chord_residual(tp, mus)
+    M = np.empty(len(ts))
+    karg = np.empty(len(ts), dtype=int)
+    S = np.empty((len(ts), 224))
+    for i in range(len(ts)):
+        sd = chain_speeds(tp, mus[i][None, :], v0)[0]
+        S[i] = np.abs(sd)
+        karg[i] = int(np.argmax(S[i]))
+        M[i] = S[i].max()
+    return M, karg, S, res
+
+
+def vmax_of(tp, label, coarse_lo=-60.0, coarse_hi=420.0, coarse_dt=0.5):
+    t0 = time.time()
+    ts_c = np.arange(coarse_lo, coarse_hi + coarse_dt, coarse_dt)
+    Mc, kc, _, res = M_profile(tp, ts_c)
+    assert res < 1e-8
+    i_peak = int(np.argmax(Mc))
+    # 边界衰减核查（G3：峰值窗外 M 应明显低于峰值且趋于 1）
+    far = [Mc[0], Mc[-1]]
+    # 细化：峰值邻域 ±3 s，步长 0.01
+    ts_f = np.arange(ts_c[i_peak] - 3.0, ts_c[i_peak] + 3.0 + 0.01, 0.01)
+    Mf, kf, _, _ = M_profile(tp, ts_f)
+    j = int(np.argmax(Mf))
+    M_star = float(Mf[j])
+    t_peak = float(ts_f[j])
+    k_peak = int(kf[j])
+    V_max = V_LIM / M_star
+    # P7 缩放引理复核：v0=V_max 时最大速度应恰为 2
+    sd_chk = chain_speeds(tp, walk_chain_series(tp, np.array([t_peak])), V_max)[0]
+    vs_max = float(np.max(np.abs(sd_chk)))
+    print(f"\n[{label}] 粗扫 {len(ts_c)} 点（{time.time()-t0:.1f}s）: 峰值区 t≈{ts_c[i_peak]:.1f} s")
+    print(f"[{label}] 细化 601 点: M* = {M_star:.6f} @ t={t_peak:.2f} s（把手 {k_peak}）")
+    print(f"[{label}] 窗外衰减: M({coarse_lo})={far[0]:.4f}, M({coarse_hi})={far[-1]:.4f}（应≈1 且 << M*）")
+    print(f"[{label}] V_max = 2/M* = {V_max:.6f} m/s")
+    print(f"[{label}] P7 复核: v0=V_max 时最大把手速度 = {vs_max:.9f} (应=2)")
+    assert abs(vs_max - 2.0) < 1e-8
+    return dict(M_star=M_star, t_peak=t_peak, k_peak=k_peak, V_max=V_max,
+                ts_c=ts_c, Mc=Mc, ts_f=ts_f, Mf=Mf)
+
+
+base = tg.find_baseline()
+opt_R2, opt_sol, _, _ = tg.shortest_curve(base)
+print(f"[路径] 基线 2:1: R2={base['R2']:.6f}, L={base['L']:.6f} | "
+      f"最短: R2*={opt_R2:.6f}, L*={opt_sol['L']:.6f}")
+
+r_base = vmax_of(base["tp"], "基线2:1")
+r_opt = vmax_of(opt_sol["tp"], "最短曲线")
+
+print(f"\n[结论] 龙头最大行进速度（问题4 设定路径）V_max = {r_base['V_max']:.6f} m/s")
+print(f"[对比] 最短调头曲线下 V_max = {r_opt['V_max']:.6f} m/s"
+      f"（{'高于' if r_opt['V_max'] > r_base['V_max'] else '低于'}基线 "
+      f"{abs(r_opt['V_max'] - r_base['V_max']):.6f} m/s）")
+# 细化分辨率敏感性
+ts_h = np.arange(r_base["t_peak"] - 3.0, r_base["t_peak"] + 3.0 + 0.005, 0.005)
+Mh, _, _, _ = M_profile(base["tp"], ts_h)
+print(f"[敏感性] 细化步长 0.01→0.005: M* = {Mh.max():.6f}"
+      f"（Δ={Mh.max()-r_base['M_star']:.2e}），V_max = {2/Mh.max():.6f}")
+
+np.savez(f"{ROOT}/output/q5_result.npz",
+         V_max=r_base["V_max"], M_star=r_base["M_star"], t_peak=r_base["t_peak"],
+         V_max_opt=r_opt["V_max"], M_opt=r_opt["M_star"])
+
+# ---------- 图（P7：坐标轴紧贴有效数据段） ----------
+fig, ax = plt.subplots(figsize=(8.6, 4.8))
+ax.plot(r_base["ts_c"], r_base["Mc"], "-", color="#9467bd", lw=0.7, alpha=0.6)
+ax.plot(r_base["ts_f"], r_base["Mf"], "-", color="#1f77b4", lw=1.3,
+        label=f"基线 2:1 路径（V_max={r_base['V_max']:.4f} m/s）")
+ax.plot(r_opt["ts_c"], r_opt["Mc"], "-", color="#d2b48c", lw=0.7, alpha=0.6)
+ax.plot(r_opt["ts_f"], r_opt["Mf"], "--", color="#2ca02c", lw=1.3,
+        label=f"最短调头曲线（V_max={r_opt['V_max']:.4f} m/s）")
+ax.axhline(r_base["M_star"], color="#1f77b4", ls=":", lw=0.8)
+ax.plot([r_base["t_peak"]], [r_base["M_star"]], "o", color="#d62728", ms=5,
+        label=f"峰值 M*={r_base['M_star']:.4f} @ t={r_base['t_peak']:.2f} s")
+ax.axhline(1.0, color="0.6", lw=0.7, ls="-.")
+ax.set_xlabel("t (s)（t=0 为龙头进入调头曲线；行进窗口外 M→1）")
+ax.set_ylabel("速度比 M(t) = max 把手速度 / 龙头速度")
+ax.set_title("问题5：全程速度比峰值与龙头最大速度")
+ax.legend(fontsize=8, loc="upper right")
+save_fig(fig, "fig_q5_mt.png")
+
+print(f"\n[运行时间] 问题5 总耗时 {time.time()-t_start:.1f} s")

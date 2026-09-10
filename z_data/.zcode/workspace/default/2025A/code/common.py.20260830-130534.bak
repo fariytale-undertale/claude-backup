@@ -1,0 +1,237 @@
+# -*- coding: utf-8 -*-
+"""
+2025 国赛 A 题 公共模块：运动学 + 遮蔽判据（体判据/点判据）+ 区间求并集
+
+判据口径（用户已确认，G0/G1 闸门记录见 solving_records/进度与判据记录.md）：
+  - 云团半径 R = 10 m（题面"云团中心10 m范围"取半径口径）
+  - 有效期 20 s 自起爆时刻起；云团以 3 m/s 匀速下沉
+  - 体判据为主：真目标圆柱表面采样点（3圈×36=108点）视线全部被云团截断才计有效
+  - 点判据仅作对比：导弹→轴线中点 (0,200,5) 单点视线
+  - 判定原语：点到线段距离 ≤ R（含端点）
+  - 引信延迟下界 t_f ≥ 1.0 s（用户确认）
+  - 重力 g = 9.8 m/s²
+"""
+import numpy as np
+
+# ---------------- 题面常量 ----------------
+G = 9.8                    # 重力加速度 m/s^2
+R_CLOUD = 10.0             # 云团有效半径 m（半径口径，用户确认）
+V_SINK = 3.0               # 云团下沉速度 m/s
+T_EFF = 20.0               # 云团有效持续时间 s（自起爆）
+V_MISSILE = 300.0          # 导弹速度 m/s
+V_UAV_MIN, V_UAV_MAX = 70.0, 140.0
+T_FUSE_MIN = 1.0           # 引信延迟下界 s（用户确认）
+DROP_GAP_MIN = 1.0         # 同机相邻投放最小间隔 s
+
+# 假目标 = 原点；真目标圆柱
+TGT_AXIS = (0.0, 200.0)    # 真目标轴线 (x, y)
+TGT_R = 7.0                # 真目标半径 m
+TGT_H = 10.0               # 真目标高 m
+TGT_MID = np.array([0.0, 200.0, 5.0])   # 轴线中点（点判据用）
+
+MISSILES = {               # 初始位置
+    'M1': np.array([20000.0, 0.0, 2000.0]),
+    'M2': np.array([19000.0, 600.0, 2100.0]),
+    'M3': np.array([18000.0, -600.0, 1900.0]),
+}
+UAVS = {
+    'FY1': np.array([17800.0, 0.0, 1800.0]),
+    'FY2': np.array([12000.0, 1400.0, 1400.0]),
+    'FY3': np.array([6000.0, -3000.0, 700.0]),
+    'FY4': np.array([11000.0, 2000.0, 1800.0]),
+    'FY5': np.array([13000.0, -2000.0, 1300.0]),
+}
+# 导弹飞行总时长（到达假目标原点即终止）
+T_END = {k: float(np.linalg.norm(p) / V_MISSILE) for k, p in MISSILES.items()}
+
+# 导弹方向单位向量（直指原点），符号断言：均指向原点（与初始位置反向）
+_M_DIR = {k: -p / np.linalg.norm(p) for k, p in MISSILES.items()}
+
+
+def missile_pos(name, t):
+    """导弹 name 在 t 时刻位置（t 超过 T_END 后停在原点，不再参与判定）。"""
+    t = np.asarray(t, dtype=float)
+    p0 = MISSILES[name]
+    te = T_END[name]
+    tc = np.clip(t, 0.0, te)
+    return p0[None, :] + V_MISSILE * tc[:, None] * _M_DIR[name][None, :]
+
+
+def uav_pos(name, heading_deg, speed, t):
+    """无人机等高度匀速直线：t=0 位于初始点，航向 heading_deg（x正向起逆时针 0~360°）。"""
+    t = np.asarray(t, dtype=float)
+    th = np.deg2rad(heading_deg)
+    u0 = UAVS[name]
+    return u0[None, :] + speed * t[:, None] * np.array([np.cos(th), np.sin(th), 0.0])[None, :]
+
+
+def bomb_trajectory(uav0, heading_deg, speed, t_drop, t_fuse, t):
+    """干扰弹投放后抛体轨迹（初速=无人机速度，仅重力）。
+    t 为绝对时刻标量或数组；t < t_drop 时无定义（返回 NaN）。"""
+    th = np.deg2rad(heading_deg)
+    v0 = speed * np.array([np.cos(th), np.sin(th), 0.0])
+    tau = np.asarray(t, dtype=float) - t_drop
+    pos = np.asarray(uav0, dtype=float)[None, :] + tau[..., None] * v0[None, :]
+    pos = pos.copy()
+    pos[..., 2] -= 0.5 * G * tau ** 2
+    return pos
+
+
+def burst_point(uav0, heading_deg, speed, t_drop, t_fuse):
+    """起爆点坐标与起爆时刻。"""
+    p = bomb_trajectory(uav0, heading_deg, speed, t_drop, t_fuse, t_drop + t_fuse)
+    return p[0], t_drop + t_fuse
+
+
+def cloud_center(uav0, heading_deg, speed, t_drop, t_fuse, t):
+    """云团中心：起爆后以 3 m/s 匀速下沉；t 不在有效期 [t_b, t_b+20] 内返回 NaN 行。"""
+    B, t_b = burst_point(uav0, heading_deg, speed, t_drop, t_fuse)
+    t = np.asarray(t, dtype=float)
+    c = np.tile(B, t.shape + (1,)) if B.ndim == 1 else B.copy()
+    c = np.array(B, dtype=float)[None, :] + np.zeros((t.size, 3))
+    tau = t - t_b
+    ok = (tau >= 0) & (tau <= T_EFF)
+    c[ok, 2] -= V_SINK * tau[ok]
+    c[~ok] = np.nan
+    return c, t_b
+
+
+# ---------------- 目标采样点集 ----------------
+def target_samples(n_circle=36, n_ring=3):
+    """真目标圆柱表面采样点：(n_ring, n_circle) 网格。
+    n_ring=3 → z ∈ {0, 5, 10} 三圈（下底圆周、侧面中线、上底圆周）。
+    返回 (N,3) 数组。"""
+    zs = np.linspace(0.0, TGT_H, n_ring)
+    angs = np.linspace(0.0, 2 * np.pi, n_circle, endpoint=False)
+    pts = []
+    for z in zs:
+        for a in angs:
+            pts.append([TGT_AXIS[0] + TGT_R * np.cos(a), TGT_AXIS[1] + TGT_R * np.sin(a), z])
+    return np.array(pts)
+
+
+def dist_point_to_segment(p, a, b):
+    """点到线段距离，向量化：p (N,3) 或 (3,)；a,b 为端点 (3,)。"""
+    p = np.atleast_2d(p)
+    ab = b - a
+    denom = np.dot(ab, ab)
+    s = np.clip(((p - a) @ ab) / denom, 0.0, 1.0)
+    proj = a[None, :] + s[:, None] * ab[None, :]
+    return np.linalg.norm(p - proj, axis=1)
+
+
+# ---------------- 遮蔽判定 ----------------
+def _shade_boolean(cloud_c, missile_pts, samples):
+    """cloud_c (T,3) 含 NaN（无效期），missile_pts (T,3)，samples (N,3)。
+    返回 (T,) bool：体判据 = 所有采样点视线均被截断。"""
+    T = cloud_c.shape[0]
+    out = np.zeros(T, dtype=bool)
+    for i in range(T):
+        if np.isnan(cloud_c[i, 0]):
+            continue
+        m = missile_pts[i]
+        d = dist_point_to_segment(samples, m, np.broadcast_to(cloud_c[i], (1, 3))[0])
+        out[i] = bool(np.all(d <= R_CLOUD))
+    return out
+
+
+def shade_boolean_point(cloud_c, missile_pts, mid=TGT_MID):
+    """点判据：仅判轴线中点视线。"""
+    T = cloud_c.shape[0]
+    out = np.zeros(T, dtype=bool)
+    for i in range(T):
+        if np.isnan(cloud_c[i, 0]):
+            continue
+        d = dist_point_to_segment(mid[None, :], missile_pts[i], cloud_c[i])[0]
+        out[i] = d <= R_CLOUD
+    return out
+
+
+def _bisect_edge(f, t_lo, t_hi, n_iter=60):
+    """f 为标量布尔函数；在 (t_lo, t_hi) 之间二分求翻转边界。"""
+    for _ in range(n_iter):
+        tm = 0.5 * (t_lo + t_hi)
+        if f(tm) == f(t_lo):
+            t_lo = tm
+        else:
+            t_hi = tm
+    return 0.5 * (t_lo + t_hi)
+
+
+def shading_intervals(uav0, heading_deg, speed, t_drop, t_fuse, missile='M1',
+                      dt=0.05, samples=None, criterion='body'):
+    """单枚弹对单枚导弹的遮蔽区间列表 [(t1,t2),...]。
+    求解网格 dt 找符号变化，端点二分精化。criterion: 'body'|'point'。"""
+    if samples is None:
+        samples = target_samples()
+    B, t_b = burst_point(uav0, heading_deg, speed, t_drop, t_fuse)
+    t0, t1 = t_b, min(t_b + T_EFF, T_END[missile])
+    if t1 <= t0:
+        return [], B, t_b
+    n = int(np.ceil((t1 - t0) / dt)) + 1
+    tg = np.linspace(t0, t1, n)
+    cg = np.array(B)[None, :] + np.zeros((n, 3))
+    tau = tg - t_b
+    cg[:, 2] -= V_SINK * tau
+    mg = missile_pos(missile, tg)
+
+    if criterion == 'body':
+        mask = _shade_boolean(cg, mg, samples)
+    else:
+        mask = shade_boolean_point(cg, mg)
+
+    def f(t):
+        c = np.array(B) - np.array([0, 0, V_SINK * (t - t_b)])
+        m = missile_pos(missile, np.array([t]))[0]
+        if criterion == 'body':
+            return bool(np.all(dist_point_to_segment(samples, m, c) <= R_CLOUD))
+        return bool(dist_point_to_segment(TGT_MID[None, :], m, c)[0] <= R_CLOUD)
+
+    ivals = []
+    i = 0
+    while i < n:
+        if mask[i]:
+            j = i
+            while j + 1 < n and mask[j + 1]:
+                j += 1
+            ta = t0 if i == 0 else _bisect_edge(f, tg[i - 1], tg[i])
+            tb = t1 if j == n - 1 else _bisect_edge(f, tg[j + 1], tg[j])
+            ivals.append((ta, tb))
+            i = j + 1
+        else:
+            i += 1
+    return ivals, B, t_b
+
+
+def union_length(intervals):
+    """区间并集总时长。"""
+    if not intervals:
+        return 0.0
+    iv = sorted(intervals)
+    tot, cs, ce = 0.0, iv[0][0], iv[0][1]
+    for a, b in iv[1:]:
+        if a > ce:
+            tot += ce - cs
+            cs, ce = a, b
+        else:
+            ce = max(ce, b)
+    return tot + ce - cs
+
+
+def total_shading(bombs, missile='M1', dt=0.05, samples=None, criterion='body'):
+    """多枚弹（对同一导弹）遮蔽区间并集时长。
+    bombs: list of (uav0, heading_deg, speed, t_drop, t_fuse)。"""
+    allv = []
+    for uav0, hd, sp, td, tf in bombs:
+        iv, _, _ = shading_intervals(uav0, hd, sp, td, tf, missile, dt, samples, criterion)
+        allv += iv
+    return union_length(allyv)
+
+
+def all_intervals(bombs, missile='M1', dt=0.05, samples=None, criterion='body'):
+    """返回每枚弹的区间列表（供结果表与画图）。"""
+    out = []
+    for uav0, hd, sp, td, tf in bombs:
+        iv, B, tb = shading_intervals(uav0, hd, sp, td, tf, missile, dt, samples, criterion)
+        out.append(iv)
+    return out

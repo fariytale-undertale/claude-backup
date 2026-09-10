@@ -1,0 +1,190 @@
+# -*- coding: utf-8 -*-
+"""问题4：p=1.7 m 螺线的 S 形调头曲线。
+- 基线 2:1 曲线几何求解与检验
+- 填写 output/result4.xlsx（t=-100..100）
+- "能否变短"：保持三相切的曲线族 L(R2) 求最短
+产出：figures/fig_q4_*.png、output/tables/q4_paper_table.xlsx。"""
+import numpy as np
+import openpyxl
+import os, re, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dragon_core import (walk_chain_series, chain_points, chain_speeds,
+                         chord_residual, S_arc, spiral_point)
+import turn_geom as tg
+from figures_common import save_fig, COLORS
+import matplotlib.pyplot as plt
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ATT = "D:/pdf/国赛/国赛历年真题/2024年赛题/A题/附件"
+t_start = time.time()
+
+print(f"[几何] theta_b = {tg.th_b:.6f} rad, A = ({tg.A[0]:.6f}, {tg.A[1]:.6f}), "
+      f"行进方向 T = ({tg.T_in[0]:.6f}, {tg.T_in[1]:.6f})")
+print(f"[几何] S(theta_b) = {float(S_arc(tg.th_b, tg.b)):.6f} m（盘入螺线上 A 的弧位）")
+
+base = tg.find_baseline()
+tp = base["tp"]
+L_base = base["L"]
+d1, d2 = base["sweep"]
+print(f"\n[基线] 2:1 S 曲线: R2={base['R2']:.6f}, R1={base['R1']:.6f}, "
+      f"切点 T1=({base['T1'][0]:.6f}, {base['T1'][1]:.6f}), 总长 L={L_base:.6f} m")
+print(f"[基线] 弧扫角 = ({np.degrees(d1):.2f}°, {np.degrees(d2):.2f}°), "
+      f"弧长 = ({base['L1']:.6f}, {base['L2']:.6f}) m")
+print(f"[检验] 端点切向连续性指标 = {base['g1']:.6f} (应=1)")
+print(f"[检验] |A| = {np.linalg.norm(tg.A):.6f} (应=4.5); 曲线最大半径 rmax = "
+      f"{base['rmax']:.6f} (<=4.5, 盘内)")
+assert abs(np.linalg.norm(tg.A) - 4.5) < 1e-12 and base["rmax"] <= 4.5 + 1e-6
+
+# ---------- result4 填写（基线路径，v0=1，t 即头部弧位 mu） ----------
+ts4 = np.arange(-100, 101, dtype=float)
+mu4 = walk_chain_series(tp, ts4)
+X4 = chain_points(tp, mu4)
+sd4 = chain_speeds(tp, mu4, 1.0)
+v4 = np.abs(sd4)
+res4 = chord_residual(tp, mu4)
+print(f"\n[检验] result4 批量弦长残差 = {res4:.3e}")
+assert res4 < 1e-8
+h = 1e-6
+for t_chk in (-50.0, 0.0, 50.0):
+    Xp = chain_points(tp, walk_chain_series(tp, np.array([t_chk + h])))[0]
+    Xm = chain_points(tp, walk_chain_series(tp, np.array([t_chk - h])))[0]
+    vfd = np.linalg.norm(Xp - Xm, axis=1) / (2 * h)
+    rel = np.abs(v4[int(t_chk) + 100] - vfd) / vfd
+    print(f"[检验] t={t_chk:+.0f}s 递推vs差分 max rel err = {rel.max():.2e}")
+    assert rel.max() < 1e-4
+print(f"[检验] t=0 龙头位置 = ({X4[100, 0, 0]:.6f}, {X4[100, 0, 1]:.6f}) 应=A")
+assert np.linalg.norm(X4[100, 0] - tg.A) < 1e-9
+
+
+def handle_of(lab):
+    if lab.startswith("龙头"):
+        return 0
+    if lab.startswith("龙尾（后）"):
+        return 223
+    if lab.startswith("龙尾"):
+        return 222
+    return int(re.match(r"^第(\d+)节龙身", lab).group(1))
+
+
+wb = openpyxl.load_workbook(f"{ATT}/result4.xlsx")
+ws_pos, ws_vel = wb["位置"], wb["速度"]
+tcol, tcolv = {}, {}
+for c in range(2, ws_pos.max_column + 1):
+    tcol[int(str(ws_pos.cell(row=1, column=c).value).replace("s", "").strip())] = c
+    tcolv[int(str(ws_vel.cell(row=1, column=c).value).replace("s", "").strip())] = c
+for r in range(2, ws_pos.max_row + 1):
+    k = handle_of(ws_pos.cell(row=r, column=1).value)
+    isy = "y" in ws_pos.cell(row=r, column=1).value
+    for t, c in tcol.items():
+        ws_pos.cell(row=r, column=c).value = round(float(X4[t, k, 1 if isy else 0]), 6) + 0.0
+    kv = handle_of(ws_vel.cell(row=r, column=1).value)
+    for t, c in tcolv.items():
+        ws_vel.cell(row=r, column=c).value = round(float(v4[t, kv]), 6) + 0.0
+wb.save(f"{ROOT}/output/result4.xlsx")
+print("saved:", f"{ROOT}/output/result4.xlsx")
+
+paper_rows = [("龙头", 0), ("第1节龙身", 1), ("第51节龙身", 51), ("第101节龙身", 101),
+              ("第151节龙身", 151), ("第201节龙身", 201), ("龙尾（后）", 223)]
+paper_ts = [-100, -50, 0, 50, 100]
+wb_out = openpyxl.Workbook()
+ws1 = wb_out.active; ws1.title = "位置"
+ws1.append([""] + [f"{t} s" for t in paper_ts])
+for name, k in paper_rows:
+    ws1.append([f"{name}x (m)"] + [round(float(X4[t + 100, k, 0]), 6) for t in paper_ts])
+    ws1.append([f"{name}y (m)"] + [round(float(X4[t + 100, k, 1]), 6) for t in paper_ts])
+ws2 = wb_out.create_sheet("速度")
+ws2.append([""] + [f"{t} s" for t in paper_ts])
+for name, k in paper_rows:
+    ws2.append([f"{name} (m/s)"] + [round(float(v4[t + 100, k]), 6) for t in paper_ts])
+wb_out.save(f"{ROOT}/output/tables/q4_paper_table.xlsx")
+print("saved:", f"{ROOT}/output/tables/q4_paper_table.xlsx")
+print("\n== 问题4 表（基线 2:1 曲线） ==")
+for name, k in paper_rows:
+    print(f"{name:>10} " + " | ".join(
+        f"t={t:+5d}: ({X4[t+100,k,0]:>8.4f},{X4[t+100,k,1]:>8.4f}) v={v4[t+100,k]:.4f}"
+        for t in paper_ts))
+
+# ---------- "能否变短" ----------
+R2_star, opt, R2s, Ls = tg.shortest_curve(base)
+L_star = opt["L"]
+print(f"\n[族] L(R2) 扫描: R2_b = {base['R2']:.6f} m, 有效参数占比 = "
+      f"{np.mean(~np.isnan(Ls)):.2%}")
+print(f"[求解] 最短调头曲线: R2* = {R2_star:.6f} m, R1* = {opt['R1']:.6f} m, "
+      f"L* = {L_star:.6f} m")
+print(f"[求解] 基线 L = {L_base:.6f} m → 缩短 {L_base - L_star:.6f} m "
+      f"（{100 * (L_base - L_star) / L_base:.2f}%）")
+print(f"[检验] 最短曲线 rmax = {opt['rmax']:.6f} <= 4.5（盘内）")
+print(f"[结论] 能否调整圆弧使调头曲线变短：{'能' if L_star < L_base - 1e-9 else '不能'}")
+
+np.savez(f"{ROOT}/output/q4_geom.npz", R2_base=base["R2"], L_base=L_base,
+         R2_star=R2_star, L_star=L_star, R2s=R2s, Ls=Ls)
+
+# ---------- 图 ----------
+fig, ax = plt.subplots(figsize=(8.6, 8.6))
+th_out = np.linspace(tg.th_b, tg.th_b + 40, 3000)
+pin = spiral_point(th_out, tg.b)
+ax.plot(pin[:, 0], pin[:, 1], color="0.8", lw=0.8)
+ax.plot(-pin[:, 0], -pin[:, 1], color="0.8", lw=0.8, label="盘入/盘出螺线")
+th_sm = np.linspace(1e-6, tg.th_b, 2000)
+psp = spiral_point(th_sm, tg.b)
+ax.plot(psp[:, 0], psp[:, 1], color="0.92", lw=0.5)
+ax.plot(-psp[:, 0], -psp[:, 1], color="0.92", lw=0.5)
+for sol, c, lab in ((base, "#1f77b4", f"基线 2:1 曲线（L={L_base:.4f} m）"),
+                    (opt, "#2ca02c", f"最短曲线（L*={L_star:.4f} m）")):
+    mus = np.linspace(0, sol["L"], 3000)
+    pts = sol["tp"].point(mus)
+    ax.plot(pts[:, 0], pts[:, 1], color=c, lw=1.8, label=lab)
+circ = plt.Circle((0, 0), tg.R_DISK, fill=False, color="#d62728", ls="--", lw=1.1,
+                  label="调头空间边界（r=4.5 m）")
+ax.add_patch(circ)
+for pt, nm in ((tg.A, "A"), (tg.Ap, "A'"), (base["T1"], "T1")):
+    ax.plot([pt[0]], [pt[1]], "k.", ms=7)
+    ax.annotate(nm, pt, textcoords="offset points", xytext=(5, 5), fontsize=10)
+ax.plot(0, 0, "k+", ms=10)
+ax.set_aspect("equal")
+ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
+ax.set_xlim(-6.5, 6.5); ax.set_ylim(-6.5, 6.5)
+ax.set_title("调头几何：基线 2:1 S 曲线与最短曲线")
+ax.legend(fontsize=8, loc="upper right")
+save_fig(fig, "fig_q4_geom.png")
+
+fig, ax = plt.subplots(figsize=(7.4, 4.6))
+ok_mask = ~np.isnan(Ls)
+ax.plot(R2s[ok_mask], Ls[ok_mask], "-", color="#1f77b4", lw=1.4, label="曲线族 L(R2)")
+ax.plot([base["R2"]], [L_base], "o", color="#9467bd", ms=6,
+        label=f"基线 2:1（L={L_base:.4f}）")
+ax.plot([R2_star], [L_star], "*", color="#d62728", ms=12,
+        label=f"最短 R2*={R2_star:.4f}（L*={L_star:.4f}）")
+ax.set_xlabel("后段圆弧半径 R2 (m)"); ax.set_ylabel("调头曲线长度 L (m)")
+ax.set_title("保持三相切的调头曲线族长度")
+ax.legend(fontsize=9)
+save_fig(fig, "fig_q4_Lcurve.png")
+
+fig, (axa, axb) = plt.subplots(1, 2, figsize=(12.0, 6.4))
+for t, c in ((-50, "#1f77b4"), (50, "#d62728")):
+    axa.plot(X4[t + 100, :, 0], X4[t + 100, :, 1], ".", ms=2.2, color=c, label=f"t={t:+d} s")
+circ = plt.Circle((0, 0), tg.R_DISK, fill=False, color="0.65", ls=":", lw=1)
+axa.add_patch(circ)
+axa.plot(0, 0, "k+", ms=9)
+axa.set_aspect("equal")
+axa.set_xlabel("x (m)"); axa.set_ylabel("y (m)")
+axa.set_title("调头前后全队位形")
+axa.legend(fontsize=9)
+axb.plot(X4[100, :, 0], X4[100, :, 1], ".-", ms=3.5, lw=0.7, color="#1f77b4",
+         label="t=0 把手链")
+mus = np.linspace(-30, 30, 2000)
+pts = tp.point(mus)
+axb.plot(pts[:, 0], pts[:, 1], color="0.85", lw=1.0, label="调头路径")
+circ = plt.Circle((0, 0), tg.R_DISK, fill=False, color="#d62728", ls="--", lw=1.1)
+axb.add_patch(circ)
+axb.plot([tg.A[0]], [tg.A[1]], "k*", ms=10)
+axb.annotate("A（t=0 龙头）", tg.A, textcoords="offset points", xytext=(6, 6), fontsize=9)
+axb.set_xlim(-6, 6); axb.set_ylim(-6, 6)
+axb.set_aspect("equal")
+axb.set_xlabel("x (m)"); axb.set_ylabel("y (m)")
+axb.set_title("t=0 局部：龙头位于调头曲线起点")
+axb.legend(fontsize=9)
+fig.tight_layout()
+save_fig(fig, "fig_q4_configs.png")
+
+print(f"\n[运行时间] 问题4 总耗时 {time.time()-t_start:.1f} s")

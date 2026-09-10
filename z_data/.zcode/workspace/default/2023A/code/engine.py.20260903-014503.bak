@@ -1,0 +1,313 @@
+# -*- coding: utf-8 -*-
+"""2023A 定日镜场核心引擎
+- 太阳位置（题面公式）/ DNI 解析式 / 60 时点表
+- numba 并行核：子格遮挡（阴影+阻挡，光线-矩形求交）+ 子格束锥截断（bbox⊕太阳圆盘 行积分）
+- 场级输出：面积加权余弦/阴影遮挡/截断/总效率、E_field(t)、基线B（点镜）对照、逐镜年 均 eta
+口径依据：solving_records/02_G0G1判据闸门.md
+"""
+import numpy as np
+import pandas as pd
+from numba import njit, prange
+from scipy.spatial import cKDTree
+
+# ---------------- 常数（题面给定） ----------------
+PHI = np.radians(39.4)          # 北纬
+G_SUN = 1.366                   # kW/m2
+H_KM = 3.0
+A_DNI = 0.4237 - 0.00821 * (6.0 - H_KM) ** 2
+B_DNI = 0.5055 + 0.00595 * (6.5 - H_KM) ** 2
+C_DNI = 0.2711 + 0.01858 * (2.5 - H_KM) ** 2
+ETA_REF = 0.92
+SUN_HALF = 0.00465              # 太阳圆盘半角 rad（G0 #1）
+TOWER_H = 80.0                  # 集热器中心离地
+REC_R = 3.5                     # 集热器半径
+REC_HH = 4.0                    # 集热器半高
+FIELD_R = 350.0
+EXCL_R = 100.0
+MONTH_D = np.array([306, 337, 0, 31, 61, 92, 122, 153, 184, 214, 245, 275])  # 每月21日
+STS = np.array([9.0, 10.5, 12.0, 13.5, 15.0])
+MONTHS = [f"{m}月21日" for m in range(1, 13)]
+
+
+def declination(D):
+    return np.arcsin(np.sin(2 * np.pi * D / 365.0) * np.sin(np.radians(23.45)))
+
+
+def sun_vec(D, ST):
+    """返回 指向太阳的单位向量 (E,N,U) 与高度角 rad。方位角从正北顺时针（G0 #6）。"""
+    d = declination(D)
+    w = np.pi / 12.0 * (ST - 12.0)
+    sa = np.cos(d) * np.cos(PHI) * np.cos(w) + np.sin(d) * np.sin(PHI)
+    sa = min(1.0, max(-1.0, sa))
+    al = np.arcsin(sa)
+    ca = np.sqrt(max(1e-12, 1.0 - sa * sa))
+    sg = -np.cos(d) * np.sin(w) / ca
+    cg = (np.sin(d) - sa * np.sin(PHI)) / (ca * np.cos(PHI))
+    g = np.arctan2(sg, cg)
+    return np.array([np.sin(g) * ca, np.cos(g) * ca, sa]), al
+
+
+def dni(al):
+    s = np.sin(al)
+    if s <= 1e-9:
+        return 0.0
+    return G_SUN * (A_DNI + B_DNI * np.exp(-C_DNI / s))
+
+
+def build_times():
+    """60 时点：返回 sun(T,3), alpha(T), D(T), month_idx(T)"""
+    T = 60
+    sun = np.empty((T, 3)); alpha = np.empty(T); D = np.empty(T); midx = np.empty(T, dtype=int)
+    k = 0
+    for m in range(12):
+        for st in STS:
+            s, a = sun_vec(float(MONTH_D[m]), float(st))
+            sun[k] = s; alpha[k] = a; D[k] = MONTH_D[m]; midx[k] = m; k += 1
+    return sun, alpha, D, midx
+
+
+def eta_at_arr(hr):
+    return 0.99321 - 0.0001176 * hr + 1.97e-8 * hr ** 2
+
+
+# ---------------- numba 核 ----------------
+@njit(cache=True, inline='always')
+def _row_len(y, dxo, dyo, bx, by, sig):
+    """束锥 bbox⊕盘 在高度 y 处与接收器轮廓 x 区间的重叠长度"""
+    ad = abs(y - dyo)
+    if ad >= by + sig:
+        return 0.0
+    if ad <= by:
+        X = bx + sig
+    else:
+        X = bx + np.sqrt(sig * sig - (ad - by) * (ad - by))
+    hi = dxo + X
+    if hi <= -3.5:
+        return 0.0
+    lo = dxo - X
+    if lo >= 3.5:
+        return 0.0
+    top = 3.5 if hi > 3.5 else hi
+    bot = -3.5 if lo < -3.5 else lo
+    return top - bot
+
+
+@njit(cache=True, inline='always')
+def _occluded(px, py, pz, sx, sy, sz, rxi, ryi, rzi, Li,
+              n, wv, hv, mxy, mz, mw, mh, nbr_start, nbr_idx, i):
+    """子格中心点 p 的遮挡判定：阴影(沿 s)或阻挡(沿 r_i) 任一命中即 1"""
+    for jp in range(nbr_start[i], nbr_start[i + 1]):
+        j = nbr_idx[jp]
+        jx = mxy[j, 0]; jy = mxy[j, 1]; jz = mz[j]
+        nxj = n[j, 0]; nyj = n[j, 1]; nzj = n[j, 2]
+        # 阴影：p + tau*s 射向太阳，被 j 挡
+        den = sx * nxj + sy * nyj + sz * nzj
+        if den > 1e-9:
+            tau = ((jx - px) * nxj + (jy - py) * nyj + (jz - pz) * nzj) / den
+            if tau > 1e-6:
+                qx = px + tau * sx - jx; qy = py + tau * sy - jy; qz = pz + tau * sz - jz
+                uj = qx * wv[j, 0] + qy * wv[j, 1] + qz * wv[j, 2]
+                vj = qx * hv[j, 0] + qy * hv[j, 1] + qz * hv[j, 2]
+                if abs(uj) <= mw[j] * 0.5 and abs(vj) <= mh[j] * 0.5:
+                    return 1
+        # 阻挡：p + tau*r_i 射向集热器，被 j 挡（tau < Li 内才有效）
+        den2 = rxi * nxj + ryi * nyj + rzi * nzj
+        if den2 > 1e-9:
+            tau = ((jx - px) * nxj + (jy - py) * nyj + (jz - pz) * nzj) / den2
+            if 1e-6 < tau < Li - 0.05:
+                qx = px + tau * rxi - jx; qy = py + tau * ryi - jy; qz = pz + tau * rzi - jz
+                uj = qx * wv[j, 0] + qy * wv[j, 1] + qz * wv[j, 2]
+                vj = qx * hv[j, 0] + qy * hv[j, 1] + qz * hv[j, 2]
+                if abs(uj) <= mw[j] * 0.5 and abs(vj) <= mh[j] * 0.5:
+                    return 1
+    return 0
+
+
+@njit(parallel=True, fastmath=True, cache=True)
+def _eval_kernel(mxy, mz, mw, mh, sun, tower, nbr_start, nbr_idx, eat, dni_arr, K, QN, eta_out):
+    """返回 outs(T,5): [eta_cos_f, eta_sb_f, eta_tr_f, eta_f(面积加权), E_field(kW)]"""
+    T = sun.shape[0]
+    N = mxy.shape[0]
+    outs = np.empty((T, 6))
+    for t in prange(T):
+        sx = sun[t, 0]; sy = sun[t, 1]; sz = sun[t, 2]
+        n = np.empty((N, 3)); wv = np.empty((N, 3)); hv = np.empty((N, 3))
+        for i in range(N):
+            rx = tower[0] - mxy[i, 0]; ry = tower[1] - mxy[i, 1]; rz = tower[2] - mz[i]
+            L = np.sqrt(rx * rx + ry * ry + rz * rz)
+            rx /= L; ry /= L; rz /= L
+            gx = sx + rx; gy = sy + ry; gz = sz + rz
+            gl = np.sqrt(gx * gx + gy * gy + gz * gz)
+            n[i, 0] = gx / gl; n[i, 1] = gy / gl; n[i, 2] = gz / gl
+            wl = np.sqrt(n[i, 0] ** 2 + n[i, 1] ** 2)
+            wv[i, 0] = -n[i, 1] / wl; wv[i, 1] = n[i, 0] / wl; wv[i, 2] = 0.0
+            hv[i, 0] = n[i, 1] * wv[i, 2] - n[i, 2] * wv[i, 1]
+            hv[i, 1] = n[i, 2] * wv[i, 0] - n[i, 0] * wv[i, 2]
+            hv[i, 2] = n[i, 0] * wv[i, 1] - n[i, 1] * wv[i, 0]
+        sA = 0.0; sc = 0.0; sb_ = 0.0; st_ = 0.0; sAe = 0.0; sce = 0.0
+        step = 1.0 / K
+        for i in range(N):
+            rx = tower[0] - mxy[i, 0]; ry = tower[1] - mxy[i, 1]; rz = tower[2] - mz[i]
+            Li = np.sqrt(rx * rx + ry * ry + rz * rz)
+            rxi = rx / Li; ryi = ry / Li; rzi = rz / Li
+            cos_i = sx * n[i, 0] + sy * n[i, 1] + sz * n[i, 2]
+            # --- 遮挡（阴影+阻挡）子格点采样 ---
+            lost = 0
+            w2 = mw[i] * 0.5; h2 = mh[i] * 0.5
+            sw = mw[i] * step; sh = mh[i] * step
+            for a in range(K):
+                u = -w2 + (a + 0.5) * sw
+                for b in range(K):
+                    v = -h2 + (b + 0.5) * sh
+                    px = mxy[i, 0] + u * wv[i, 0] + v * hv[i, 0]
+                    py = mxy[i, 1] + u * wv[i, 1] + v * hv[i, 1]
+                    pz = mz[i] + u * wv[i, 2] + v * hv[i, 2]
+                    lost += _occluded(px, py, pz, sx, sy, sz, rxi, ryi, rzi, Li,
+                                      n, wv, hv, mxy, mz, mw, mh, nbr_start, nbr_idx, i)
+            sb_i = 1.0 - lost * step * step
+            # --- 截断：子格束锥 bbox⊕盘 行积分 ---
+            # 垂直轴 = ẑ 在 ⊥r̂ 平面内的分量；水平轴 = 垂直轴 × r̂（符号不影响对称轮廓）
+            vz_x = -rzi * rxi; vz_y = -rzi * ryi; vz_z = 1.0 - rzi * rzi
+            vz_l = np.sqrt(vz_x * vz_x + vz_y * vz_y + vz_z * vz_z)
+            vz_l = max(vz_l, 1e-9)
+            vz_x /= vz_l; vz_y /= vz_l; vz_z /= vz_l
+            hz_x = vz_y * rzi - vz_z * ryi
+            hz_y = vz_z * rxi - vz_x * rzi
+            hz_z = vz_x * ryi - vz_y * rxi
+            sig = Li * SUN_HALF
+            sum_f = 0.0
+            for a in range(K):
+                u = -w2 + (a + 0.5) * sw
+                for b in range(K):
+                    v = -h2 + (b + 0.5) * sh
+                    cx = mxy[i, 0] + u * wv[i, 0] + v * hv[i, 0]
+                    cy = mxy[i, 1] + u * wv[i, 1] + v * hv[i, 1]
+                    cz = mz[i] + u * wv[i, 2] + v * hv[i, 2]
+                    # 子格两条边投影：(水平, 垂直)
+                    p1x = (sw * wv[i, 0]) * hz_x + (sw * wv[i, 1]) * hz_y + (sw * wv[i, 2]) * hz_z
+                    p1y = (sw * wv[i, 0]) * vz_x + (sw * wv[i, 1]) * vz_y + (sw * wv[i, 2]) * vz_z
+                    p2x = (sh * hv[i, 0]) * hz_x + (sh * hv[i, 1]) * hz_y + (sh * hv[i, 2]) * hz_z
+                    p2y = (sh * hv[i, 0]) * vz_x + (sh * hv[i, 1]) * vz_y + (sh * hv[i, 2]) * vz_z
+                    area_p = abs(p1x * p2y - p1y * p2x)
+                    bx = (abs(p1x) + abs(p2x)) * 0.5
+                    by = (abs(p1y) + abs(p2y)) * 0.5
+                    dxo = (cx - tower[0]) * hz_x + (cy - tower[1]) * hz_y + (cz - tower[2]) * hz_z
+                    dyo = (cx - tower[0]) * vz_x + (cy - tower[1]) * vz_y + (cz - tower[2]) * vz_z
+                    y0 = dyo - by - sig
+                    if y0 < -REC_HH:
+                        y0 = -REC_HH
+                    y1 = dyo + by + sig
+                    if y1 > REC_HH:
+                        y1 = REC_HH
+                    fk = 0.0
+                    if y1 > y0 and area_p > 1e-12:
+                        # Simpson
+                        hstep = (y1 - y0) / QN
+                        acc = _row_len(y0, dxo, dyo, bx, by, sig) + _row_len(y1, dxo, dyo, bx, by, sig)
+                        for q in range(1, QN):
+                            yq = y0 + q * hstep
+                            val = _row_len(yq, dxo, dyo, bx, by, sig)
+                            if q % 2 == 1:
+                                acc += 4.0 * val
+                            else:
+                                acc += 2.0 * val
+                        area = acc * hstep / 3.0
+                        fk = area / area_p  # 子格功率归一：sigma->0 时 fk->1
+                        if fk > 1.0:
+                            fk = 1.0
+                    sum_f += fk
+            tr_i = sum_f * step * step
+            eta_i = ETA_REF * cos_i * sb_i * tr_i * eat[i]
+            eta_out[t, i] = eta_i
+            Ai = mw[i] * mh[i]
+            sA += Ai
+            sc += Ai * cos_i
+            sb_ += Ai * sb_i
+            st_ += Ai * tr_i
+            sAe += Ai * eta_i
+            sce += Ai * cos_i * eat[i]
+        outs[t, 0] = sc / sA
+        outs[t, 1] = sb_ / sA
+        outs[t, 2] = st_ / sA
+        outs[t, 3] = sAe / sA
+        outs[t, 4] = dni_arr[t] * sAe
+        outs[t, 5] = sce
+    return outs
+
+
+# ---------------- python 封装 ----------------
+def build_neighbors(mxy, cutoff):
+    tree = cKDTree(mxy)
+    pairs = tree.query_pairs(cutoff, output_type='ndarray')
+    N = mxy.shape[0]
+    cnt = np.zeros(N + 1, dtype=np.int64)
+    if len(pairs):
+        for a, b in pairs:
+            cnt[a + 1] += 1; cnt[b + 1] += 1
+    nbr_start = np.cumsum(cnt)
+    nbr_idx = np.empty(nbr_start[-1], dtype=np.int64)
+    pos = nbr_start[:-1].copy()
+    for a, b in pairs:
+        nbr_idx[pos[a]] = b; pos[a] += 1
+        nbr_idx[pos[b]] = a; pos[b] += 1
+    return nbr_start, nbr_idx
+
+
+def evaluate_field(mxy, z0, w, h, tower_xy, K=12, QN=64, cutoff=50.0, times=None):
+    """返回 dict：60 时点的场级分量与 E_field(kW)、E_baselineB(kW)、逐镜年均 eta、A_total"""
+    if times is None:
+        sun, alpha, D, midx = build_times()
+    else:
+        sun, alpha, D, midx = times
+    d_arr = np.array([dni(a) for a in alpha])
+    N = mxy.shape[0]
+    mz = np.asarray(z0, dtype=float)
+    mw = np.asarray(w, dtype=float)
+    mh = np.asarray(h, dtype=float)
+    tower = np.array([tower_xy[0], tower_xy[1], TOWER_H])
+    hr = np.hypot(mxy[:, 0] - tower[0], mxy[:, 1] - tower[1])
+    hr = np.sqrt(hr ** 2 + (TOWER_H - mz) ** 2)
+    eat = eta_at_arr(hr)
+    nbr_start, nbr_idx = build_neighbors(mxy, cutoff)
+    eta_out = np.empty((60, N))
+    import time as _tm
+    t0 = _tm.perf_counter()
+    outs = _eval_kernel(np.ascontiguousarray(mxy, dtype=float), mz, mw, mh,
+                        np.ascontiguousarray(sun), tower, nbr_start, nbr_idx, eat, d_arr,
+                        K, QN, eta_out)
+    el = _tm.perf_counter() - t0
+    A_tot = float((mw * mh).sum())
+    E_B = d_arr * outs[:, 5] * ETA_REF  # 基线B：点镜（无遮挡无截断）
+    return {
+        'df': pd.DataFrame({
+            'month_idx': midx, 'month': [MONTHS[i] for i in midx], 'ST': np.tile(STS, 12),
+            'eta_cos': outs[:, 0], 'eta_sb': outs[:, 1], 'eta_tr': outs[:, 2],
+            'eta': outs[:, 3], 'E_kW': outs[:, 4], 'E_B_kW': E_B, 'DNI': d_arr,
+            'alpha_deg': np.degrees(alpha)}),
+        'eta_mirror_TN': eta_out, 'A_total': A_tot, 'hr': hr, 'eval_time_s': el,
+    }
+
+
+def layout_rings(tower_xy, w, h, z0, R0, dR, g_az, field_r=FIELD_R, excl=EXCL_R):
+    """同心环+隔环半pitch错位布局。返回 (mxy, n) 或 None（空布局）。间距按弦长精确控制。"""
+    tx, ty = tower_xy
+    dmin = w + 5.0 + g_az
+    xs = []; ys = []
+    R = R0
+    k = 0
+    while R <= field_r:
+        if R > excl:
+            n = int(np.floor(np.pi / np.arcsin(min(1.0, dmin / (2.0 * R)))))
+            if n >= 3:
+                phi0 = 0.0 if k % 2 == 0 else np.pi / n
+                for q in range(n):
+                    ang = phi0 + 2 * np.pi * q / n
+                    x = tx + R * np.cos(ang); y = ty + R * np.sin(ang)
+                    rr = np.hypot(x, y)
+                    if rr <= field_r and np.hypot(x - tx, y - ty) > excl:
+                        xs.append(x); ys.append(y)
+        R += dR
+        k += 1
+    if not xs:
+        return None, 0
+    return np.column_stack([xs, ys]), len(xs)

@@ -1,0 +1,193 @@
+# -*- coding: utf-8 -*-
+"""问题3：最小螺距 p，使龙头前把手能沿螺线盘入到调头空间边界（r=4.5 m）。
+判据（模型修正回路后）：G(p) = 盘入全程（头部距边界弧长 tau ∈ [0, 100] m，
+且验证窗外裕度更大）的最小板凳间距 > 0。
+对照判据 = 全程中心线距离最小值 - 0.30。
+边界时刻单点判据 F(p) 仅作为必要下界对照报告。
+产出：figures/fig_q3_*.png、output/q3_result.npy。"""
+import numpy as np
+import os, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dragon_core import (Spiral, ReversedPath, walk_chain, walk_chain_series, chain_points,
+                         chord_residual, min_bench_distance,
+                         min_centerline_distance, S_arc)
+from figures_common import save_fig, COLORS
+import matplotlib.pyplot as plt
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+t_start = time.time()
+R_DISK = 4.5
+TAU_MAX = 100.0          # 盘入末段考察窗口（头部距边界弧长, m = s, v=1）
+
+
+def path_of(p):
+    sp = Spiral(p)
+    return ReversedPath(sp), sp
+
+
+def scan_min_D(p, R_disk=R_DISK, tau_max=TAU_MAX, coarse=2.5, refine=True):
+    """盘入末段全程最小间距。返回 (Dmin, tau*, pair, D 序列)。
+    refine=False 跳过 0.1 m 细化（二分迭代期间用），最终根再细化抛光。"""
+    rp, sp = path_of(p)
+    s_b = float(S_arc(R_disk / sp.b, sp.b))
+    taus = np.arange(0.0, tau_max + coarse, coarse)
+    mus = walk_chain_series(rp, -(s_b + taus))
+    Xs = chain_points(rp, mus)
+    vals = np.empty(len(taus))
+    pairs = []
+    for i in range(len(taus)):
+        d, pair, _ = min_bench_distance(Xs[i])
+        vals[i], _ = d, pairs.append(pair)
+    k = int(np.argmin(vals))
+    if refine:
+        # 细化：极小值邻域 ±coarse，步长 0.1
+        lo = max(0.0, taus[k] - coarse)
+        hi = min(tau_max, taus[k] + coarse)
+        fine = np.arange(lo, hi + 0.05, 0.1)
+        for tau in fine:
+            X = chain_points(rp, walk_chain_series(rp, np.array([-(s_b + tau)])))[0]
+            d, pair, _ = min_bench_distance(X)
+            if d < vals[k]:
+                vals[k], taus[k], pairs[k] = d, tau, pair
+    order = np.argsort(taus)
+    return float(vals[k]), float(taus[k]), pairs[k], vals[order], taus[order]
+
+
+def G_rect(p, **kw):
+    return scan_min_D(p, **kw)[0]
+
+
+def G_center(p, R_disk=R_DISK, tau_max=TAU_MAX, coarse=2.5):
+    rp, sp = path_of(p)
+    s_b = float(S_arc(R_disk / sp.b, sp.b))
+    taus = np.arange(0.0, tau_max + coarse, coarse)
+    dmin = np.inf
+    for tau in taus:
+        X = chain_points(rp, walk_chain_series(rp, np.array([-(s_b + tau)])))[0]
+        d, _ = min_centerline_distance(X)
+        dmin = min(dmin, d)
+    return dmin - 0.30
+
+
+def bisect_p(fn, lo, hi, xtol=1e-7):
+    """fn 单调增（p 越大裕度越大），lo 处 <=0，hi 处 >0。"""
+    assert fn(lo) <= 0 < fn(hi), f"bracket invalid: f(lo)={fn(lo)}, f(hi)={fn(hi)}"
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if fn(mid) > 0:
+            hi = mid
+        else:
+            lo = mid
+        if hi - lo < xtol:
+            break
+    return 0.5 * (lo + hi)
+
+
+# ---------- 粗扫 G(p) ----------
+print("[粗扫] G(p)（全程最小间距），p = 0.40 ... 0.55 步长 0.01：")
+ps_c = np.arange(0.40, 0.5501, 0.01)
+Gs = np.array([G_rect(p) for p in ps_c])
+for p, g in zip(ps_c, Gs):
+    print(f"    G({p:.2f}) = {g:+.4f}")
+neg = np.where(Gs <= 0)[0]
+pos = np.where(Gs > 0)[0]
+assert len(pos) and len(neg), "粗扫区间内无变号"
+lo_p = ps_c[pos[0] - 1]
+hi_p = ps_c[pos[0]]
+
+# ---------- 求根（主判据） ----------
+p_min = bisect_p(G_rect, lo_p, hi_p)
+Dmin_at, tau_at, pair_at, _, _ = scan_min_D(p_min)
+print(f"\n[求解] 最小螺距 p_min = {p_min:.6f} m")
+print(f"[求解] p_min 时全程最小间距 = {Dmin_at:.3e} m @ 头部距边界 tau={tau_at:.2f} m，"
+      f"临界板凳对 = {pair_at}")
+
+# ---------- 边界时刻单点判据（必要下界对照） ----------
+def F_boundary(p, R_disk=R_DISK):
+    rp, sp = path_of(p)
+    s_b = float(S_arc(R_disk / sp.b, sp.b))
+    X = chain_points(rp, walk_chain_series(rp, np.array([-s_b])))[0]
+    return min_bench_distance(X)[0]
+
+F = np.array([F_boundary(p) for p in ps_c])
+negF = np.where(F <= 0)[0]
+posF = np.where(F > 0)[0]
+p_bound = bisect_p(F_boundary, ps_c[posF[0] - 1], ps_c[posF[0]]) if len(posF) and posF[0] > 0 else np.nan
+print(f"[对照] 边界时刻单点判据根 = {p_bound:.6f} m（必要下界，较全程判据小 "
+      f"{p_min - p_bound:.6f} m）")
+
+# ---------- 对照判据 ----------
+p_min_cl = bisect_p(G_center, 0.42, 0.60)
+print(f"[对照] 中心线判据（全程）p_min = {p_min_cl:.6f} m（较主判据 "
+      f"{'小' if p_min_cl < p_min else '大'} {abs(p_min - p_min_cl):.6f} m）")
+
+# ---------- 可行性验证：p_min 与 p_min±步 ----------
+for p_chk, tag in ((p_min - 1e-4, "p_min-1e-4"), (p_min + 1e-4, "p_min+1e-4"),
+                   (p_min + 0.005, "p_min+0.005")):
+    d, tau, pair, _, _ = scan_min_D(p_chk)
+    print(f"[验证] p={p_chk:.6f}（{tag}）: 全程最小间距 = {d:+.6f} m @ tau={tau:.2f}")
+
+# ---------- G8 灵敏度：调头空间直径 ±10% ----------
+print("\n[G8] 调头空间直径敏感性（全程判据）：")
+rows = []
+for dd in (8.1, 8.55, 9.0, 9.45, 9.9):
+    a, b_ = 0.40, 0.60
+    fn = lambda p: G_rect(p, R_disk=dd / 2)
+    p_dd = bisect_p(fn, a, b_) if fn(a) <= 0 < fn(b_) else np.nan
+    rows.append((dd, p_dd))
+    print(f"    直径 {dd:.2f} m → p_min = {p_dd:.6f} m")
+
+# ---------- 图 ----------
+fig, (axa, axb) = plt.subplots(1, 2, figsize=(11.5, 4.3))
+ps_f = np.linspace(0.40, 0.55, 31)
+Gs_f = np.array([G_rect(p) for p in ps_f])
+Fs_f = np.array([F_boundary(p) for p in ps_f])
+axa.plot(ps_f, Gs_f, "-", color="#1f77b4", lw=1.4, label="全程判据 G(p)")
+axa.plot(ps_f, Fs_f, "--", color="#9467bd", lw=1.1, label="边界时刻单点判据 F(p)")
+axa.axhline(0, color="0.6", lw=0.7)
+axa.plot([p_min], [0], "o", color="#d62728", ms=6, label=f"p_min = {p_min:.6f} m")
+axa.plot([p_bound], [0], "s", color="#9467bd", ms=5, label=f"下界 {p_bound:.4f} m")
+axa.set_xlabel("螺距 p (m)"); axa.set_ylabel("最小板凳间距 D (m)")
+axa.set_title("判据函数与最小螺距")
+axa.legend(fontsize=8)
+# D-tau 曲线：p_min 上下各一条
+rp, sp = path_of(p_min + 0.005)
+s_b5 = float(S_arc(R_DISK / sp.b, sp.b))
+taus_f = np.arange(0, 81.0, 2.0)
+D_up = np.array([min_bench_distance(
+    chain_points(rp, walk_chain_series(rp, np.array([-(s_b5 + tau)])))[0])[0] for tau in taus_f])
+rp, sp = path_of(p_min - 0.005)
+s_b5m = float(S_arc(R_DISK / sp.b, sp.b))
+D_dn = np.array([min_bench_distance(
+    chain_points(rp, walk_chain_series(rp, np.array([-(s_b5m + tau)])))[0])[0] for tau in taus_f])
+axb.plot(taus_f, D_up, "-", color="#2ca02c", lw=1.2,
+         label=f"p = p_min+0.005（可行，min={D_up.min():.4f}）")
+axb.plot(taus_f, D_dn, "-", color="#d62728", lw=1.2,
+         label=f"p = p_min-0.005（不可行，min={D_dn.min():.4f}）")
+axb.axhline(0, color="0.6", lw=0.7)
+axb.set_xlabel("头部距边界弧长 tau (m)（=盘入剩余时间, s）")
+axb.set_ylabel("最小板凳间距 D (m)")
+axb.set_title("盘入末段全程裕度")
+axb.legend(fontsize=8)
+fig.tight_layout()
+save_fig(fig, "fig_q3_Fp.png")
+
+_, _, _, X_at, _ = None, None, None, None, None
+rp, sp = path_of(p_min)
+s_b_at = float(S_arc(R_DISK / sp.b, sp.b))
+X_at = chain_points(rp, walk_chain_series(rp, np.array([-(s_b_at + tau_at)])))[0]
+fig, ax = plt.subplots(figsize=(7.0, 7.0))
+ax.plot(X_at[:, 0], X_at[:, 1], "-", color="#1f77b4", lw=0.9)
+circ = plt.Circle((0, 0), R_DISK, fill=False, color="#d62728", lw=1.2, ls="--")
+ax.add_patch(circ)
+ax.plot(X_at[0, 0], X_at[0, 1], "o", color="#d62728", ms=5, label="龙头前把手")
+ax.plot(0, 0, "k+", ms=10)
+ax.set_aspect("equal")
+ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
+ax.set_title(f"p = {p_min:.6f} m 临界位形（tau={tau_at:.1f} m，间距 {Dmin_at:.4f} m）")
+ax.legend(fontsize=9)
+save_fig(fig, "fig_q3_config.png")
+
+np.save(f"{ROOT}/output/q3_result.npy",
+        np.array([p_min, p_bound, p_min_cl] + [r[1] for r in rows]))
+print(f"\n[运行时间] 问题3 总耗时 {time.time()-t_start:.1f} s")

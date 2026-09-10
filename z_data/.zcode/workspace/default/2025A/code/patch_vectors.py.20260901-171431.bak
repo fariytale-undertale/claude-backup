@@ -1,0 +1,97 @@
+# -*- coding: utf-8 -*-
+"""论文向量格式补丁：向量/矢量一律黑斜体 \\boldsymbol，标量白斜体。
+覆盖：式(1)-(3)、式(Q2)、正文内联符号、符号表（补 5 行 + 黑斜体说明）。"""
+import io
+
+P = r'D:\z_data\.zcode\workspace\default\2025A\paper\main.tex'
+s = io.open(P, encoding='utf-8').read()
+
+R = []
+
+# ---- 0. 式(1)：引入速度矢量 v0，位置矢量全黑斜体 ----
+R.append((
+ r"""P_d=U_0+v\,t_d\,(\cos\theta,\sin\theta,0),\qquad
+P(t)=P_d+v\,(t-t_d)\,(\cos\theta,\sin\theta,0)-\frac{g}{2}(t-t_d)^2\,e_z .""",
+ r"""\boldsymbol{v}_0=v\,(\cos\theta,\sin\theta,0),\qquad
+\boldsymbol{P}_d=\boldsymbol{U}_0+t_d\,\boldsymbol{v}_0,\qquad
+\boldsymbol{P}(t)=\boldsymbol{P}_d+(t-t_d)\,\boldsymbol{v}_0-\frac{g}{2}(t-t_d)^2\,\boldsymbol{e}_z ."""))
+
+# ---- 1. 式(2) 云团中心 ----
+R.append((r"C(t)=B-3\,(t-t_b)\,e_z .",
+          r"\boldsymbol{C}(t)=\boldsymbol{B}-3\,(t-t_b)\,\boldsymbol{e}_z ."))
+
+# ---- 2. 式(3) 判据 ----
+R.append((r"g_j(t)=\mathrm{dist}\big(C(t),\ \mathrm{seg}[M_1(t),q_j]\big)-R\ \le 0 ,",
+          r"g_j(t)=\mathrm{dist}\big(\boldsymbol{C}(t),\ \mathrm{seg}[\boldsymbol{M}_1(t),\boldsymbol{q}_j]\big)-R\ \le 0 ,"))
+
+# ---- 3. Q2 优化模型 ----
+R.append((r"\max_{x}\ \tau(x)",
+          r"\max_{\boldsymbol{x}}\ \tau(\boldsymbol{x})"))
+
+# ---- 4. Q1 建模准备：导弹矢量 ----
+R.append((r"$M_1(0)=(20000,0,2000)$",
+          r"$\boldsymbol{M}_1(0)=(20000,0,2000)$"))
+R.append((r"$\hat u=-M_1(0)/\|M_1(0)\|=(-0.99504,0,-0.09950)$",
+          r"$\hat{\boldsymbol{u}}=-\boldsymbol{M}_1(0)/\|\boldsymbol{M}_1(0)\|=(-0.99504,0,-0.09950)$"))
+R.append((r"$M_1(t)=M_1(0)+300\,t\,\hat u$，飞行总时长 $T_1=\|M_1(0)\|/300",
+          r"$\boldsymbol{M}_1(t)=\boldsymbol{M}_1(0)+300\,t\,\hat{\boldsymbol{u}}$，飞行总时长 $T_1=\|\boldsymbol{M}_1(0)\|/300"))
+R.append((r"$U_0=(17800,0,1800)$",
+          r"$\boldsymbol{U}_0=(17800,0,1800)$"))
+R.append((r"$P_d=(17620,0,1800)$",
+          r"$\boldsymbol{P}_d=(17620,0,1800)$"))
+R.append((r"起爆点 $B=P(t_b)$、起爆时刻",
+          r"起爆点 $\boldsymbol{B}=\boldsymbol{P}(t_b)$、起爆时刻"))
+R.append((r"起爆点 $B=(17188,\ 0,\ 1736.496)$",
+          r"起爆点 $\boldsymbol{B}=(17188,\ 0,\ 1736.496)$"))
+
+# ---- 5. Q2/Q3 决策向量 ----
+R.append((r"决策变量为 $x=(\theta,\,v,\,t_d,\,t_f)$",
+          r"决策变量为 $\boldsymbol{x}=(\theta,\,v,\,t_d,\,t_f)$"))
+R.append((r"决策变量扩展为 $x=(\theta,v,\ t_{d1},t_{f1},\ t_{d2},t_{f2},\ t_{d3},t_{f3})$",
+          r"决策变量扩展为 $\boldsymbol{x}=(\theta,v,\ t_{d1},t_{f1},\ t_{d2},t_{f2},\ t_{d3},t_{f3})$"))
+
+# ---- 6. 符号表：向量行黑斜体 + 补 5 行 ----
+R.append((r"$P_d,\ B$ & 投放点、起爆点位置矢量 & m \\",
+          r"""$\boldsymbol{P}_d,\ \boldsymbol{B}$ & 投放点、起爆点位置矢量 & m \\
+$\boldsymbol{v}_0$ & 干扰弹初速度（水平）矢量，$v$ 为其模 & m/s \\
+$\boldsymbol{e}_z$ & $z$ 轴单位向量 & -- \\
+$\hat{\boldsymbol{u}}$ & 导弹 M1 弹道单位方向向量 & -- \\
+$\|\cdot\|$ & 向量的 Euclid 范数 & -- \\
+$\boldsymbol{x}$ & 决策变量向量（问题二/三） & -- \\"""))
+R.append((r"$C(t)$ & 云团球心位置 & m \\",
+          r"$\boldsymbol{C}(t)$ & 云团球心位置 & m \\"))
+R.append((r"$M_i(t)$ & 导弹 $M_i$ 在 $t$ 时刻位置 & m \\",
+          r"$\boldsymbol{M}_i(t)$ & 导弹 $M_i$ 在 $t$ 时刻位置 & m \\"))
+R.append((r"$q_j$ & 真目标圆柱表面第 $j$ 个采样点 & m \\",
+          r"$\boldsymbol{q}_j$ & 真目标圆柱表面第 $j$ 个采样点 & m \\"))
+R.append((r"$T_i$ & 导弹 $M_i$ 的飞行总时长 & s \\",
+          r"$T_i$ & 导弹 $M_i$ 的飞行总时长 & s \\" + "\n" +
+          r"\bottomrule" + "\n" + r"\end{tabular}" + "\n\n" +
+          r"{\footnotesize 注：黑斜体字母表示向量/矢量，白斜体表示标量；式中的坐标三元组" + "\n" +
+          r"（如 $(17620,0,1800)$）为对应向量在本文坐标系下的分量。}" + "\n" +
+          r"\end{table}"))
+
+# ---- 7. 内联通用记号（在以上特定替换之后执行）----
+G = [
+ (r"$\{q_j\}$", r"$\{\boldsymbol{q}_j\}$"),
+ (r"$P_d$", r"$\boldsymbol{P}_d$"),
+ (r"$C(t)$", r"$\boldsymbol{C}(t)$"),
+ (r"$M_1(t)$", r"$\boldsymbol{M}_1(t)$"),
+ (r"$M_i(t)$", r"$\boldsymbol{M}_i(t)$"),
+ (r"$q_j$", r"$\boldsymbol{q}_j$"),
+ (r"$B$", r"$\boldsymbol{B}$"),
+]
+
+applied = 0
+for old, new in R:
+    assert old in s, 'NOT FOUND: ' + old[:60]
+    s = s.replace(old, new)
+    applied += 1
+for old, new in G:
+    n = s.count(old)
+    assert n > 0, 'G token missing: ' + old
+    s = s.replace(old, new)
+    applied += n
+
+io.open(P, 'w', encoding='utf-8').write(s)
+print('向量格式替换完成，共', applied, '处')

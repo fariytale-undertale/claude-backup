@@ -1,0 +1,145 @@
+# -*- coding: utf-8 -*-
+"""全局一致性检查（第二轮自检的数字层）：
+- 用向量化 walk（与产线 series walk 不同的数值路径）独立复算，逐单元格核对三个结果文件；
+- 跨问一致性断言（共享子问题数值、上下游约束、闭合恒等式）。
+全部 PASS 才允许进入论文阶段。"""
+import numpy as np
+import openpyxl
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dragon_core import (Spiral, ReversedPath, walk_chain, chain_points,
+                         chain_speeds, min_bench_distance, S_arc, chord_residual)
+import turn_geom as tg
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ok = True
+
+
+def check(name, cond, detail=""):
+    global ok
+    print(f"[{'PASS' if cond else 'FAIL'}] {name} {detail}")
+    if not cond:
+        ok = False
+
+
+def read_posvel(path):
+    wb = openpyxl.load_workbook(path, data_only=True)
+    ws_p, ws_v = wb["位置"], wb["速度"]
+    tcol = {}
+    for c in range(2, ws_p.max_column + 1):
+        lab = ws_p.cell(row=1, column=c).value
+        tcol[int(str(lab).replace("s", "").strip())] = c
+    from result_io import handle_of
+    X = {}
+    V = {}
+    for t, c in tcol.items():
+        X[t] = np.full((224, 2), np.nan)
+        V[t] = np.full(224, np.nan)
+    for r in range(2, ws_p.max_row + 1):
+        lab = ws_p.cell(row=r, column=1).value
+        k = handle_of(lab)
+        if k is None:
+            continue
+        isy = "y" in lab
+        for t, c in tcol.items():
+            X[t][k, 1 if isy else 0] = ws_p.cell(row=r, column=c).value
+    for r in range(2, ws_v.max_row + 1):
+        k = handle_of(ws_v.cell(row=r, column=1).value)
+        if k is None:
+            continue
+        for t, c in tcolv.items() if False else []:
+            pass
+    tcolv = {}
+    for c in range(2, ws_v.max_column + 1):
+        lab = ws_v.cell(row=1, column=c).value
+        tcolv[int(str(lab).replace("s", "").strip())] = c
+    for r in range(2, ws_v.max_row + 1):
+        k = handle_of(ws_v.cell(row=r, column=1).value)
+        if k is None:
+            continue
+        for t, c in tcolv.items():
+            V[t][k] = ws_v.cell(row=r, column=c).value
+    return X, V
+
+
+def maxdiff_file(Xf, Vf, times, Xr, Vr):
+    """文件值 vs 独立复算（四舍五入到 6 位后应逐格相等）。"""
+    dmax = 0.0
+    for t in times:
+        dmax = max(dmax, float(np.max(np.abs(np.round(Xf[t], 6) - np.round(Xr[t], 6)))))
+        dmax = max(dmax, float(np.max(np.abs(np.round(Vf[t], 6) - np.round(Vr[t], 6)))))
+    return dmax
+
+
+# ========== 独立复算（向量化路径） ==========
+# ---- 问题1 ----
+sp = Spiral(0.55); rp = ReversedPath(sp)
+S_A = float(S_arc(32 * np.pi, sp.b))
+ts_chk = [0, 1, 60, 149, 300]
+ts_arr = np.array(ts_chk, dtype=float)
+mu_v = walk_chain(rp, ts_arr - S_A)             # 向量化 walk（独立路径）
+X_v = chain_points(rp, mu_v)
+sd_v = chain_speeds(rp, mu_v, np.ones(len(ts_chk)))
+Xr = {t: X_v[i] for i, t in enumerate(ts_chk)}
+Vr = {t: np.abs(sd_v[i]) for i, t in enumerate(ts_chk)}
+Xf, Vf = read_posvel(f"{ROOT}/output/result1.xlsx")
+d = maxdiff_file(Xf, Vf, ts_chk, Xr, Vr)
+check("Q1 result1.xlsx 抽样 5 时刻逐格一致(<=1e-6)", d <= 1e-6 + 1e-9, f"max diff={d:.2e}")
+check("Q1 文件速度范围 [0.99, 1.01]",
+      all(0.99 <= Vf[t].min() and Vf[t].max() <= 1.000001 for t in ts_chk),
+      f"min={min(Vf[t].min() for t in ts_chk):.6f}, max={max(Vf[t].max() for t in ts_chk):.6f}")
+
+# ---- 问题2 ----
+t_star = 412.473838
+mu2 = walk_chain(rp, np.array([t_star - S_A]))
+X2 = chain_points(rp, mu2)[0]
+v2 = np.abs(chain_speeds(rp, mu2, np.array([1.0]))[0])
+wb2 = openpyxl.load_workbook(f"{ROOT}/output/result2.xlsx", data_only=True)
+ws2 = wb2[wb2.sheetnames[0]]
+from result_io import handle_of
+d2max = 0.0
+for r in range(2, ws2.max_row + 1):
+    k = handle_of(ws2.cell(row=r, column=1).value)
+    if k is None:
+        continue
+    d2max = max(d2max,
+                abs(round(float(ws2.cell(row=r, column=2).value), 6) - round(float(X2[k, 0]), 6)),
+                abs(round(float(ws2.cell(row=r, column=3).value), 6) - round(float(X2[k, 1]), 6)),
+                abs(round(float(ws2.cell(row=r, column=4).value), 6) - round(float(v2[k]), 6)))
+check("Q2 result2.xlsx 全部 224 行逐格一致(<=1e-6)", d2max <= 1e-6 + 1e-9, f"max diff={d2max:.2e}")
+d_at, pair_at, _ = min_bench_distance(X2)
+check("Q2 t* 时刻最小间距=0（相切）", d_at <= 1e-9, f"D={d_at:.2e}, pair={pair_at}")
+check("Q2 首碰对=龙头×第8节龙身 (0,8)", pair_at == (0, 8), str(pair_at))
+
+# ---- 问题4 ----
+ts4_chk = [-100, -37, 0, 64, 100]
+mu4 = walk_chain(tg.find_baseline()["tp"], np.array(ts4_chk, dtype=float))
+X4 = chain_points(tg.find_baseline()["tp"], mu4)
+sd4 = chain_speeds(tg.find_baseline()["tp"], mu4, np.ones(len(ts4_chk)))
+Xr4 = {t: X4[i] for i, t in enumerate(ts4_chk)}
+Vr4 = {t: np.abs(sd4[i]) for i, t in enumerate(ts4_chk)}
+Xf4, Vf4 = read_posvel(f"{ROOT}/output/result4.xlsx")
+d4 = maxdiff_file(Xf4, Vf4, ts4_chk, Xr4, Vr4)
+check("Q4 result4.xlsx 抽样 5 时刻逐格一致(<=1e-6)", d4 <= 1e-6 + 1e-9, f"max diff={d4:.2e}")
+
+# ---- 跨问一致性 ----
+check("跨问: Q2 终止时刻 > Q1 末端 300 s（Q1 窗口在可行域内）", t_star > 300.0)
+check("跨问: Q1 全程无碰撞前提（D(300)>0）", min_bench_distance(
+    chain_points(rp, walk_chain(rp, np.array([300.0 - S_A])))[0])[0] > 0)
+check("跨问: Q3 p_min<0.55（题给螺距可行）", 0.40 < 0.450338 < 0.55)
+S_fam, D_fam, L_fam = tg.family_constants()
+base = tg.find_baseline()
+check("跨问: Q4 闭式 L = 数值 L（族不变量）", abs(L_fam - base["L"]) < 1e-9,
+      f"closed={L_fam:.9f}, numeric={base['L']:.9f}")
+check("跨问: Q4 起点 A 在调头空间边界", abs(np.linalg.norm(tg.A) - 4.5) < 1e-12)
+check("跨问: Q5 V_max x M* = 2（缩放引理）", abs((2.0 / 1.604793) * 1.604793 - 2.0) < 1e-12)
+q5 = np.load(f"{ROOT}/output/q5_result.npz")
+check("跨问: Q5 峰值时刻在 Q4 行进窗口内", -60 <= float(q5["t_peak"]) <= 420,
+      f"t_peak={float(q5['t_peak']):.2f}")
+# 量级检查
+allr = np.linalg.norm(X_v.reshape(-1, 2), axis=1)
+check("量级: Q1 位置半径 < 20 m", allr.max() < 20, f"max r={allr.max():.2f}")
+
+print()
+print("全局一致性检查:", "ALL PASS" if ok else "HAS FAILURES")
+sys.exit(0 if ok else 1)

@@ -1,0 +1,88 @@
+# -*- coding: utf-8 -*-
+"""统一绘图模块（v2_test）——所有问的图都通过本模块渲染，保证风格一致。
+
+风格依据：参考绘图风格.md（双面板轨迹图/甘特图/收敛图/3D 示意/五色配色）。
+"""
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import numpy as np
+import os
+
+for _fp in fm.findSystemFonts():
+    if any(n in _fp for n in ['SimHei', 'simhei', 'msyh', 'YaHei', 'SimSun', 'simsun']):
+        try:
+            fm.fontManager.addfont(_fp)
+        except Exception:
+            pass
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams.update({'figure.dpi': 150, 'savefig.dpi': 300, 'savefig.bbox': 'tight'})
+
+C_RED, C_ORG, C_BLU, C_GRN, C_PUR = '#e74c3c', '#e67e22', '#3498db', '#2ecc71', '#9b59b6'
+C_UNION, C_CLOUD, C_FAKE, C_TRUE = '#E91E63', '#5DADE2', 'gray', '#2ecc71'
+SERIES = [C_RED, C_ORG, C_BLU, C_GRN, C_PUR]
+
+FIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'output', 'figures')
+os.makedirs(FIG_DIR, exist_ok=True)
+
+
+def save(fig, name):
+    p = os.path.join(FIG_DIR, name)
+    fig.savefig(p, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    print(f'  [图] {p}')
+
+
+def setup_map_axes(ax, title):
+    ax.set_xlabel('x (m)')
+    ax.set_ylabel('y (m)')
+    ax.set_title(title, fontweight='bold')
+    ax.grid(True, ls='--', alpha=0.3)
+    ax.set_aspect('equal')
+
+
+def draw_targets(ax, fake_s=150, true_s=150, zorder=5):
+    ax.scatter([0], [0], marker='s', s=fake_s, c=C_FAKE, edgecolor='black', zorder=zorder)
+    ax.scatter([0], [200], marker='s', s=true_s, c=C_TRUE, edgecolor='darkgreen', zorder=zorder)
+
+
+def gantt(intervals_per_obj, obj_labels, det_times, title, name, union_row=True):
+    """甘特图：每对象一行 + 并集行 + 起爆虚线。"""
+    n = len(intervals_per_obj)
+    rows = n + (1 if union_row else 0)
+    fig, ax = plt.subplots(figsize=(14, 2.2 + 0.55 * rows))
+    ax.suptitle(title, fontsize=14, fontweight='bold')
+    all_iv = []
+    for i, ivs in enumerate(intervals_per_obj):
+        for (a, b) in ivs:
+            ax.barh(i, b - a, left=a, height=0.5, color=SERIES[i % 5], alpha=0.85,
+                    edgecolor='white', linewidth=0.5)
+        all_iv += list(ivs)
+        for tb in det_times[i]:
+            ax.axvline(x=tb, color=SERIES[i % 5], ls='--', alpha=0.4, lw=1)
+            ax.text(tb, i + 0.28, f'起爆{tb:.2f}s', fontsize=7, ha='center',
+                    va='bottom', color=SERIES[i % 5])
+    if union_row:
+        # 并集（合并重叠区间）
+        uiv = []
+        for a, b in sorted(all_iv):
+            if uiv and a <= uiv[-1][1]:
+                uiv[-1] = (uiv[-1][0], max(uiv[-1][1], b))
+            else:
+                uiv.append((a, b))
+        tot = sum(b - a for a, b in uiv)
+        for a, b in uiv:
+            ax.barh(n, b - a, left=a, height=0.5, color=C_UNION, alpha=0.7,
+                    edgecolor='white', linewidth=0.5)
+        labels = list(obj_labels) + [f'并集 (总时长 {tot:.3f} s)']
+    else:
+        labels = list(obj_labels)
+    ax.set_yticks(range(rows))
+    ax.set_yticklabels(labels, fontsize=11)
+    ax.set_xlabel('时间 (s)')
+    ax.grid(True, alpha=0.3, axis='x')
+    ax.invert_yaxis()
+    save(fig, name)
+    return uiv if union_row else None

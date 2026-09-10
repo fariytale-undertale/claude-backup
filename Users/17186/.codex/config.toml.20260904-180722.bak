@@ -1,0 +1,145 @@
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
+model_provider = "wvv"
+preferred_auth_method = "apikey"
+forced_login_method = "api"
+sandbox_mode = "danger-full-access"
+personality = "pragmatic"
+
+
+
+notify = [ "C:\\Users\\17186\\AppData\\Local\\OpenAI\\Codex\\runtimes\\cua_node\\c2900163265bdaec\\bin\\node_modules\\@oai\\sky\\bin\\windows\\codex-computer-use.exe", "turn-ended" ]
+
+[marketplaces.openai-bundled]
+source_type = "local"
+source = '\\?\C:\Users\17186\.codex\.tmp\bundled-marketplaces\openai-bundled'
+
+[marketplaces.openai-primary-runtime]
+last_updated = "2026-08-19T04:10:25Z"
+source_type = "local"
+source = '\\?\C:\Users\17186\.cache\codex-runtimes\codex-primary-runtime\plugins\openai-primary-runtime'
+
+[desktop]
+conversationDetailMode = "STEPS_COMMANDS"
+ambient-suggestions-enabled = true
+followUpQueueMode = "queue"
+integratedTerminalShell = "commandPrompt"
+localeOverride = "zh-CN"
+external-agent-import-sync-enabled = true
+show-context-window-usage = true
+
+[desktop.appearanceLightChromeTheme]
+accent = "#339cff"
+contrast = 45
+ink = "#1a1c1f"
+opaqueWindows = false
+surface = "#ffffff"
+
+[desktop.appearanceLightChromeTheme.fonts]
+
+[desktop.appearanceLightChromeTheme.semanticColors]
+diffAdded = "#00a240"
+diffRemoved = "#ba2623"
+skill = "#924ff7"
+
+[plugins."documents@openai-primary-runtime"]
+enabled = true
+
+[plugins."spreadsheets@openai-primary-runtime"]
+enabled = true
+
+[plugins."presentations@openai-primary-runtime"]
+enabled = true
+
+[plugins."visualize@openai-bundled"]
+enabled = true
+
+[plugins."remotion@openai-api-curated"]
+enabled = true
+
+[plugins."latex@openai-bundled"]
+enabled = true
+
+[plugins."codex-security@openai-api-curated"]
+enabled = true
+
+[plugins."figma@openai-api-curated"]
+enabled = true
+
+[plugins."pdf@openai-primary-runtime"]
+enabled = true
+
+[plugins."template-creator@openai-primary-runtime"]
+enabled = true
+
+[plugins."browser@openai-bundled"]
+enabled = true
+
+[plugins."codex-app-tools@openai-bundled"]
+enabled = true
+
+[features]
+memories = true
+js_repl = false
+
+[windows]
+sandbox = "elevated"
+
+[projects.'c:\users\17186\documents\codex\2026-08-13\new-chat']
+trust_level = "trusted"
+
+[projects.'c:\users\17186\documents\codex\2026-08-13\new-chat-2']
+trust_level = "trusted"
+
+[projects.'c:\users\17186\documents\codex\2026-08-19\role-d-school-1-2-3']
+trust_level = "trusted"
+
+[projects.'c:\users\17186\documents\codex\2026-08-26\role-d-school-1-2-3']
+trust_level = "trusted"
+
+[projects.'c:\users\17186\documents\codex\2026-09-04\new-chat']
+trust_level = "trusted"
+
+[memories]
+generate_memories = true
+use_memories = true
+
+[mcp_servers.node_repl]
+args = []
+command = 'C:\Users\17186\AppData\Local\OpenAI\Codex\runtimes\cua_node\c2900163265bdaec\bin\node_repl.exe'
+startup_timeout_sec = 120
+
+[mcp_servers.node_repl.env]
+NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS = "1000"
+NODE_REPL_NODE_MODULE_DIRS = 'C:\Users\17186\AppData\Local\OpenAI\Codex\runtimes\cua_node\c2900163265bdaec\bin\node_modules'
+NODE_REPL_NODE_PATH = 'C:\Users\17186\AppData\Local\OpenAI\Codex\runtimes\cua_node\c2900163265bdaec\bin\node.exe'
+NODE_REPL_TRUSTED_CODE_PATHS = 'C:\Users\17186\.codex;C:\Users\17186\AppData\Local\OpenAI\Codex\runtimes\cua_node\c2900163265bdaec\bin\node_modules'
+CODEX_HOME = 'C:\Users\17186\.codex'
+BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab"
+BROWSER_USE_TINYSKY_ENABLED = "1"
+NODE_REPL_INSTRUCTIONS_USE_CASE_BROWSER = "Control the in-app browser in conjunction with the Browser Plugin."
+NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME = "Control the Chrome browser in conjunction with the Chrome Plugin. Prefer this method of controlling Chrome over alternatives (such as Computer Use) unless the user explicitly mentions an alternative."
+BROWSER_USE_CODEX_APP_BUILD_FLAVOR = "prod"
+BROWSER_USE_CODEX_APP_VERSION = "26.901.31953"
+NODE_REPL_TRUSTED_SERVICES = '{"browser":"C:/Users/17186/.codex/plugins/cache/openai-bundled/browser/26.901.31953/scripts/browser-service.mjs","sky":"@oai/sky/service"}'
+SKY_CUA_NATIVE_PIPE = "1"
+SKY_CUA_NATIVE_PIPE_DIRECTORY = '\\.\pipe\codex-computer-use-56a12172-7a2f-47ed-848c-8367b0b7f95f'
+CODEX_CLI_PATH = 'C:\Users\17186\AppData\Local\OpenAI\Codex\bin\1e3e57cdf0634c02\codex.exe'
+
+[mcp_servers.cua_repl]
+command = 'C:\Program Files\WindowsApps\OpenAI.Codex_26.901.4073.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe'
+enabled = false
+
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.set]
+NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "8e172ec9f458f2e636fc69a1b8c68c217f6bb8d10c41f70a05a0878b73863701"
+ANTHROPIC_AUTH_TOKEN = "sk-5b97d60492a4422ea4e9282a75ed3ba7"
+ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
+ANTHROPIC_DEFAULT_HAIKU_MODEL = "deepseek-v4-flash"
+ANTHROPIC_DEFAULT_OPUS_MODEL = "deepseek-v4-pro[1M]"
+ANTHROPIC_DEFAULT_OPUS_MODEL_NAME = "deepseek-v4-pro"
+ANTHROPIC_DEFAULT_SONNET_MODEL = "deepseek-v4-pro[1M]"
+ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = "deepseek-v4-pro"
+ANTHROPIC_MODEL = "deepseek-v4-pro"

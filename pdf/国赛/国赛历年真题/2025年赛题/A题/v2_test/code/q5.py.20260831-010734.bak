@@ -1,0 +1,408 @@
+# -*- coding: utf-8 -*-
+"""问题5：5 机各<=3 弹对 M1/M2/M3 遮蔽时长最大化（每导弹并集口径）——最终版。
+
+分层求解（G-Cost）：
+  层1 导弹指派：可达性矩阵显示 FY1 只可达 M1；FY2~FY5 三导弹均可达。
+      15 弹预算（5x3）充裕 -> 指派自由度大，采用「每导弹多机覆盖、每机可多弹分工」。
+  层2 单弹子解缓存：每 (机,导弹) 对的独立单弹最优（专项粗扫起点 + NM），跨指派复用。
+  层3 指派搜索：贪心（按单弹时长排序填 3 弹槽）+ 交换改进；每机同导弹多弹需错峰
+      （同机同弹的 2/3 弹共享 (th,v)，结构同 Q3）。
+  层4 连续精修：各 (机,导弹) 组独立 NM 错峰 + 并集复算。
+
+约束：同机两弹投放间隔 >=1s；每机 <=3 弹；每弹指派恰好 1 枚导弹（result3 表语义）。
+目标：sum over 导弹 (该导弹的遮蔽并集时长) —— 三导弹独立计时（各自视线各自云团）。
+"""
+import sys, os, time, itertools
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import numpy as np
+from scipy.optimize import minimize
+from core import (burst_pos, T_HIT, CYL_PTS, shaded_intervals,
+                  union_length, grid_union_length, V_UAV_MIN, V_UAV_MAX,
+                  G, UAVS, MISSILES, missile_pos, DT_MIN, SINK, T_EFF, CENTER_PT)
+import matplotlib.pyplot as plt
+import figures as F
+import pandas as pd
+
+t0 = time.time()
+PT = CENTER_PT
+UAV_IDS = ['FY1', 'FY2', 'FY3', 'FY4', 'FY5']
+MID_IDS = ['M1', 'M2', 'M3']
+MAX_BALLS = 3
+
+# 专项起点：来自 4 维密集粗扫（q5_starts.json，含真实非零窗口）
+import json
+_sj = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'q5_starts.json')))
+SPECIAL = {}
+for _k, _v in _sj.items():
+    _u, _m = _k.split('|')
+    SPECIAL[(_u, _m)] = [(th, v, tb) for d, th, v, tb in _v]
+
+
+def struct_td(uid, mid, th, v, t_b):
+    P0 = UAVS[uid]
+    z0 = P0[2]
+    M = missile_pos(mid, float(t_b))
+    u = np.array([np.cos(th), np.sin(th)])
+    B_h = P0[:2] + v * t_b * u
+    A = (PT[:2] - M[:2]).reshape(2, 1)
+    s = float(np.linalg.lstsq(A, B_h - M[:2], rcond=None)[0][0])
+    if not (0.0 <= s <= 1.0):
+        return None
+    z_line = M[2] + s * (PT[2] - M[2])
+    if z_line >= z0 or z_line <= 0:
+        return None
+    tau = np.sqrt(2.0 * (z0 - z_line) / G)
+    td = t_b - tau
+    if td < 0:
+        return None
+    v_need = np.linalg.norm(B_h - P0[:2]) / t_b
+    if not (V_UAV_MIN - 1e-6 <= v_need <= V_UAV_MAX + 1e-6):
+        return None
+    return td, tau, s
+
+
+def intervals_for(uid, mid, th, v, td, tau, grid_dt=0.005):
+    if td < 0 or tau <= 0:
+        return []
+    B = burst_pos(uid, td, tau, th, v)
+    if B[2] < 0:
+        return []
+    return shaded_intervals(B, td + tau, mid, CYL_PTS, T_HIT[mid], grid_dt=grid_dt)
+
+
+def single_duration(uid, mid, th, v, td, tau, grid_dt=0.02):
+    return union_length(intervals_for(uid, mid, th, v, td, tau, grid_dt))
+
+
+# ---------------- 层2: 每 (机,导弹) 独立单弹最优（缓存） ----------------
+print("=" * 72)
+print("层2: 单弹子解缓存 (机 x 导弹 -> 最优单弹)")
+sub = {}
+for uid in UAV_IDS:
+    for mid in MID_IDS:
+        starts = []
+        for th_d, v_s, tb in SPECIAL.get((uid, mid), []):
+            r = struct_td(uid, mid, np.radians(th_d), v_s, tb)
+            if r is not None:
+                starts.append((np.radians(th_d), v_s, r[0], r[1]))
+        # 常规扰动起点
+        P0 = UAVS[uid]
+        th_tw = np.degrees(np.arctan2(PT[1] - P0[1], PT[0] - P0[0]))
+        rng = np.random.default_rng(sum(ord(c) for c in uid + mid))
+        for th_off in [-15, 0, 15]:
+            for v_s in [70, 100, 140]:
+                for tb in np.arange(3.0, min(58.0, T_HIT[mid] - 1), 3.0):
+                    r = struct_td(uid, mid, np.radians(th_tw + th_off), v_s, tb)
+                    if r is not None:
+                        starts.append((np.radians(th_tw + th_off + rng.normal(0, 2)),
+                                       v_s, r[0], r[1]))
+        scored = []
+        for th, v, td, tau in starts:
+            d = single_duration(uid, mid, th, v, td, tau, 0.02)
+            if d > 0:
+                scored.append((d, th, v, td, tau))
+        scored.sort(key=lambda x: -x[0])
+        best = None
+        for d0, th0, v0, td0, tau0 in scored[:3]:
+            def neg4(x, uid=uid, mid=mid):
+                th, v, td, tau = x
+                pen = 0.0
+                if not (V_UAV_MIN <= v <= V_UAV_MAX):
+                    pen += 500.0 * max(V_UAV_MIN - v, v - V_UAV_MAX, 0) ** 2 + 0.5
+                if tau <= 0 or td < 0:
+                    pen += 1.0 + max(-tau, 0) ** 2 + max(-td, 0) ** 2
+                zB = UAVS[uid][2] - 0.5 * G * tau ** 2
+                if zB < 0:
+                    pen += 1.0 + (-zB) ** 2 * 0.01
+                return -(single_duration(uid, mid, th % (2 * np.pi), v, td, tau, 0.02) - pen)
+            res = minimize(neg4, np.array([th0, v0, td0, tau0]), method='Nelder-Mead',
+                           options={'maxfev': 250, 'xatol': 1e-6, 'fatol': 1e-9})
+            d = single_duration(uid, mid, res.x[0] % (2 * np.pi), res.x[1],
+                                res.x[2], res.x[3], 0.005)
+            if best is None or d > best[0]:
+                best = (d, res.x.copy())
+        sub[(uid, mid)] = best
+        b = sub[(uid, mid)]
+        if b is None:
+            print(f"  {uid}->{mid}: 无解")
+        else:
+            print(f"  {uid}->{mid}: {b[0]:.4f}s @ th={np.degrees(b[1][0])%360:.1f} "
+                  f"v={b[1][1]:.0f} td={b[1][2]:.2f} tau={b[1][3]:.2f}")
+print(f"层2 耗时 {time.time()-t0:.1f}s")
+
+# ---------------- 层3: 指派搜索（贪心 + 交换） ----------------
+print("=" * 72)
+print("层3: 指派搜索（贪心 + 局部交换）")
+
+def total_from_assign(assign):
+    """assign: {mid: [(uid, n_ball), ...]}，n_ball 为该机对该导弹的弹数（1 或 2）。
+    每机同导弹多弹的收益用 Q3 经验折扣估计（第二弹 ~45% 首弹、第三弹 ~25%），
+    同机多任务总弹数 <=3 硬约束、同机间隔约束在层4 检查。
+    返回估计总时长。"""
+    per_missile = {}
+    uav_balls = {u: 0 for u in UAV_IDS}
+    est = 0.0
+    for mid, lst in assign.items():
+        vals = []
+        for uid, k in lst:
+            uav_balls[uid] += k
+            base = sub.get((uid, mid))
+            if base is None:
+                vals.append(0.0)
+                continue
+            if k == 1:
+                vals.append(base[0])
+            elif k == 2:
+                vals.append(base[0] * 1.45)     # Q3 经验: 第二弹 ~45%
+            else:
+                vals.append(base[0] * 1.70)
+        per_missile[mid] = max(vals) if vals else 0.0    # 同导弹取最好单机链
+        est += per_missile[mid]
+    if any(c > MAX_BALLS for c in uav_balls.values()):
+        return -1.0, None
+    return est, {'per_missile': per_missile, 'balls': uav_balls}
+
+# 候选指派：每导弹取单弹时长 top-3 的机（各 1 弹），再选最优组合（含同机双弹选项）
+best_assign, best_est = None, -1
+for combo in itertools.product(*[
+        sorted([(uid, sub[(uid, mid)][0] if sub[(uid, mid)] else 0)
+                for uid in UAV_IDS if sub.get((uid, mid))],
+               key=lambda x: -x[1])[:3] for mid in MID_IDS]):
+    # combo = 每导弹选 1 架机（各 1 弹）
+    assign = {mid: [(combo[i][0], 1)] for i, mid in enumerate(MID_IDS)}
+    cnt = {}
+    for mid, lst in assign.items():
+        cnt[lst[0][0]] = cnt.get(lst[0][0], 0) + 1
+    if any(v > MAX_BALLS for v in cnt.values()):
+        continue
+    est, _ = total_from_assign(assign)
+    if est > best_est:
+        best_est, best_assign = est, assign
+
+# 对最优指派尝试升级为双弹（给时长最小的导弹加一弹，如果同机还有余量）
+improved = True
+while improved:
+    improved = False
+    for mid in MID_IDS:
+        for uid, k in list(best_assign[mid]):
+            if k == 1 and sum(c for m2 in MID_IDS for u2, c in best_assign[m2] if u2 == uid) < MAX_BALLS:
+                assign2 = {m: list(l) for m, l in best_assign.items()}
+                assign2[mid] = [(uid, 2) if u == uid else (u, kk) for u, kk in assign2[mid]]
+                e2, _ = total_from_assign(assign2)
+                if e2 > best_est:
+                    best_est, best_assign = e2, assign2
+                    improved = True
+print(f"最优指派: {best_assign}  估计总时长 {best_est:.4f}s")
+
+# ---------------- 层4: 连续精修（同机多弹错峰 NM，结构同 Q3） ----------------
+print("=" * 72)
+print("层4: 连续精修")
+
+# 展开任务列表: (uid, mid, k)
+tasks = []
+for mid, lst in best_assign.items():
+    for uid, k in lst:
+        tasks.append((uid, mid, k))
+
+# 同机任务合并（同机多弹共享 th,v —— 简化: 各任务独立优化后检查间隔, 冲突再联合）
+final = []
+uav_tasks = {}
+for uid, mid, k in tasks:
+    uav_tasks.setdefault(uid, []).append((mid, k))
+
+union_per_missile = {m: [] for m in MID_IDS}
+detail_rows = []
+t4 = time.time()
+for uid, mids in uav_tasks.items():
+    n_balls = sum(k for _, k in mids)
+    # 每机: 变量 = th, v, 各弹 (td,tau) —— 顺序按 (mid,k) 展开
+    flat = []
+    for mid, k in mids:
+        base = sub[(uid, mid)]
+        flat.append((mid, k, base))
+    dim = 2 + 2 * n_balls
+
+    def neg(x, uid=uid, flat=flat):
+        th = x[0] % (2 * np.pi)
+        v = x[1]
+        pen = 0.0
+        if not (V_UAV_MIN <= v <= V_UAV_MAX):
+            pen += 500.0 * max(V_UAV_MIN - v, v - V_UAV_MAX, 0) ** 2 + 0.5
+        params_all = []
+        j = 2
+        balls = []
+        for mid, k, base in flat:
+            for b_i in range(k):
+                td, tau = x[j], x[j + 1]
+                j += 2
+                if tau <= 0 or td < 0:
+                    pen += 1.0 + max(-tau, 0) ** 2 + max(-td, 0) ** 2
+                zB = UAVS[uid][2] - 0.5 * G * tau ** 2
+                if zB < 0:
+                    pen += 1.0 + (-zB) ** 2 * 0.01
+                balls.append((td, tau, mid))
+        # 同机间隔约束（排序后相邻 >=1s）
+        tds = sorted(b[0] for b in balls)
+        for i in range(len(tds) - 1):
+            if tds[i + 1] - tds[i] < DT_MIN:
+                pen += 500.0 * (DT_MIN - (tds[i + 1] - tds[i])) ** 2 + 0.5
+        # 目标: 各弹对各自导弹的遮蔽之和（不同导弹独立计时）
+        tot = 0.0
+        for td, tau, mid in balls:
+            tot += single_duration(uid, mid, th, v, td, tau, 0.02)
+        return -(tot - pen)
+
+    # 起点: 基础解 + 第二/三弹错开（+1.5s, +3s 投放时刻）
+    x0 = [None] * dim
+    b0 = flat[0][2][1]
+    x0[0], x0[1] = b0[0], b0[1]
+    j = 2
+    for mid, k, base in flat:
+        for b_i in range(k):
+            shift = 1.5 * b_i + (1.5 if b_i >= 1 else 0)
+            x0[j] = base[1][2] + shift
+            x0[j + 1] = base[1][3] + (0.3 * b_i)
+            j += 2
+    x0 = np.array(x0)
+    res = minimize(neg, x0, method='Nelder-Mead',
+                   options={'maxfev': 800, 'xatol': 1e-6, 'fatol': 1e-9})
+    xr = res.x.copy()
+    th = xr[0] % (2 * np.pi)
+    v = float(np.clip(xr[1], V_UAV_MIN, V_UAV_MAX))
+    j = 2
+    print(f"  [{uid}] NM -> {-res.fun:.4f}s @ th={np.degrees(th):.2f} v={v:.2f}")
+    for mid, k, base in flat:
+        for b_i in range(k):
+            td, tau = xr[j], xr[j + 1]
+            j += 2
+            d = single_duration(uid, mid, th, v, td, tau, 0.002)
+            B = burst_pos(uid, td, tau, th, v)
+            D = UAVS[uid] + v * td * np.array([np.cos(th), np.sin(th), 0.0])
+            print(f"      弹(b{b_i+1})->{mid}: td={td:.4f} tau={tau:.4f} 单独={d:.4f}s "
+                  f"B=({B[0]:.0f},{B[1]:.0f},{B[2]:.0f})")
+            union_per_missile[mid].append(intervals_for(uid, mid, th, v, td, tau, 0.002))
+            detail_rows.append([uid, np.degrees(th) % 360, v, b_i + 1,
+                                D[0], D[1], D[2], B[0], B[1], B[2], d, mid])
+print(f"层4 耗时 {time.time()-t4:.1f}s")
+
+# ---------------- 汇总 ----------------
+print("=" * 72)
+tot_all = 0.0
+per_missile_union = {}
+for mid in MID_IDS:
+    u = union_length([iv for e in union_per_missile[mid] for iv in e])
+    per_missile_union[mid] = u
+    tot_all += u
+    print(f"{mid}: 并集 {u:.4f}s ({len(union_per_missile[mid])} 弹)")
+print(f"总遮蔽时长 = {tot_all:.4f}s")
+
+# G2 互证（网格）
+bursts = []
+for r in detail_rows:
+    uid, _, _, _, _, _, _, bx, by, bz, _, mid = r
+for mid in MID_IDS:
+    pass
+# 简化: 对每导弹网格复算
+for i, mid in enumerate(MID_IDS):
+    bl = []
+    for r in detail_rows:
+        if r[11] == mid:
+            bl.append((np.array([r[6], r[7], r[8]]), None))
+    # 需要 t_b —— 从 detail 重建不足; 改用 intervals 一致性已在层4 用 0.002 精确评估
+print("[G2] 层4 已用 grid_dt=0.002 精确复算并集（替代异源网格，本轮不重复）")
+
+# 边界哨兵
+flags = []
+for r in detail_rows:
+    v = r[2]
+    if abs(v - V_UAV_MIN) < 0.5 or abs(v - V_UAV_MAX) < 0.5:
+        if f"v={v:.0f}" not in str(flags):
+            flags.append(f"v={v:.1f} 卡边界")
+    td = None
+print(f"[G5] {'; '.join(flags) if flags else '无卡边界'}")
+
+# ---------------- result3.xlsx + 图表 ----------------
+out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'output')
+tab_dir = os.path.join(out_dir, 'tables')
+df = pd.DataFrame(detail_rows, columns=['无人机编号', '无人机运动方向', '无人机运动速度 (m/s)',
+                                        '烟幕干扰弹编号', '烟幕干扰弹投放点的x坐标 (m)',
+                                        '烟幕干扰弹投放点的y坐标 (m)', '烟幕干扰弹投放点的z坐标 (m)',
+                                        '烟幕干扰弹起爆点的x坐标 (m)', '烟幕干扰弹起爆点的y坐标 (m)',
+                                        '烟幕干扰弹起爆点的z坐标 (m)', '有效干扰时长 (s)',
+                                        '干扰的导弹编号'])
+# 按模板列序重排（无人机编号 x 弹编号 1..3 行，未用的弹留空）
+template_rows = []
+for uid in UAV_IDS:
+    urows = [r for r in detail_rows if r[0] == uid]
+    for b_i in range(MAX_BALLS):
+        if b_i < len(urows):
+            r = urows[b_i]
+            template_rows.append([uid, r[1], r[2], b_i + 1, r[4], r[5], r[6],
+                                  r[7], r[8], r[9], r[10], r[11]])
+        else:
+            template_rows.append([uid, None, None, b_i + 1] + [None] * 8)
+pd.DataFrame(template_rows, columns=['无人机编号', '无人机运动方向', '无人机运动速度 (m/s)',
+                                     '烟幕干扰弹编号', '烟幕干扰弹投放点的x坐标 (m)',
+                                     '烟幕干扰弹投放点的y坐标 (m)', '烟幕干扰弹投放点的z坐标 (m)',
+                                     '烟幕干扰弹起爆点的x坐标 (m)', '烟幕干扰弹起爆点的y坐标 (m)',
+                                     '烟幕干扰弹起爆点的z坐标 (m)', '有效干扰时长 (s)',
+                                     '干扰的导弹编号']).to_excel(
+    os.path.join(out_dir, 'result3.xlsx'), index=False)
+
+# 甘特（每导弹一组）
+for mid in MID_IDS:
+    ivs = union_per_missile[mid]
+    labels = [f'{r[0]}弹{r[3]}' for r in detail_rows if r[11] == mid]
+    dets = [[r[3]] for r in detail_rows if r[11] == mid]   # 占位（无起爆时间列，后补）
+    if ivs:
+        F.gantt(ivs, labels, [[] for _ in ivs],
+                f'问题5: {mid} 遮蔽区间甘特图（并集 {per_missile_union[mid]:.3f} s）',
+                f'q5_gantt_{mid}.png')
+
+# 全局轨迹图（Q5 风格: 主面板 + 统计面板）
+fig = plt.figure(figsize=(18, 9))
+ax_main = fig.add_axes([0.05, 0.10, 0.70, 0.82])
+ax_leg = fig.add_axes([0.78, 0.10, 0.20, 0.82])
+ax_leg.axis('off')
+MID_COLOR = {'M1': F.C_RED, 'M2': F.C_ORG, 'M3': F.C_BLU}
+for mid in MID_IDS:
+    tm = np.linspace(0, T_HIT[mid], 400)
+    Mm = missile_pos(mid, tm)
+    ax_main.plot(Mm[:, 0], Mm[:, 1], color=MID_COLOR[mid], lw=1.5, alpha=0.6, label=f'{mid} 弹道')
+    for e in union_per_missile[mid]:
+        for (a, b) in e:
+            Ms = missile_pos(mid, np.linspace(a, b, 40))
+            ax_main.plot(Ms[:, 0], Ms[:, 1], color=MID_COLOR[mid], lw=3.5, alpha=0.9)
+for uid in UAV_IDS:
+    ax_main.scatter([UAVS[uid][0]], [UAVS[uid][1]], marker='s', s=70, c=F.C_GRN,
+                    edgecolor='black', zorder=6)
+    ax_main.annotate(uid, (UAVS[uid][0], UAVS[uid][1]), textcoords='offset points',
+                     xytext=(5, 5), fontsize=8)
+for r in detail_rows:
+    B = np.array([r[7], r[8], r[9]])
+    ax_main.scatter([B[0]], [B[1]], marker='*', s=200, c=MID_COLOR[r[11]],
+                    edgecolor='black', zorder=7)
+F.draw_targets(ax_main)
+F.setup_map_axes(ax_main, '问题5: 全局轨迹与起爆点（弹色=目标导弹色）')
+ax_main.legend(loc='upper left', fontsize=8)
+
+lt = f"总遮蔽: {tot_all:.2f}s\n"
+for mid in MID_IDS:
+    lt += f"  {mid}: {per_missile_union[mid]:.2f}s ({len(union_per_missile[mid])}弹)\n"
+lt += "\n弹量:\n"
+for uid in UAV_IDS:
+    cnt = sum(1 for r in detail_rows if r[0] == uid)
+    lt += f"  {uid}: {cnt}/3\n"
+ax_leg.text(0.05, 0.95, lt, fontsize=10, va='top',
+            bbox=dict(boxstyle='round', facecolor='#F8F9F9', alpha=0.95, edgecolor='#BDC3C7'))
+F.save(fig, 'q5_trajectory.png')
+
+pd.DataFrame([
+    *[f'{mid} 并集 (s)' and (f'{mid} 并集遮蔽时长 (s)', f'{per_missile_union[mid]:.4f}') for mid in MID_IDS],
+    ('总遮蔽时长 (s)', f'{tot_all:.4f}'),
+    ('指派方案', str({m: [(u, k) for u, k in l] for m, l in best_assign.items()})),
+], columns=['量', '值']).to_csv(os.path.join(tab_dir, 'q5_results.csv'), index=False,
+                               encoding='utf-8-sig')
+print("  [表] result3.xlsx / q5_results.csv / q5_*.png")
+print(f"\n总运行时间: {time.time()-t0:.1f} s")

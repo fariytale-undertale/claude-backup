@@ -1,0 +1,38 @@
+# -*- coding: utf-8 -*-
+"""问题一补充图：定日镜入射光线、法向与反射光线的向量关系"""
+import matplotlib.pyplot as plt
+from matplotlib.patches import Arc, FancyArrowPatch
+
+import figs as fg
+
+fig, ax = plt.subplots(figsize=(7.6, 4.3))
+ax.set_xlim(-0.4, 5.6)
+ax.set_ylim(-0.35, 3.3)
+ax.set_aspect("equal")
+ax.axis("off")
+
+O = (2.6, 0.0)
+# 镜面（水平示意线）
+ax.plot([0.6, 4.6], [0, 0], color="#8a8f98", lw=4.5, solid_capstyle="round")
+# 入射光线 u：指向镜面
+ax.add_patch(FancyArrowPatch((0.7, 2.6), O, arrowstyle="-|>", mutation_scale=16,
+                             color="k", lw=1.6))
+ax.text(0.62, 2.72, "$\bm{s}$（入射）", fontsize=10.5)
+# 法向 n
+ax.add_patch(FancyArrowPatch(O, (2.6, 2.2), arrowstyle="-|>", mutation_scale=16,
+                             color="k", lw=1.6))
+ax.text(2.72, 2.05, "$\bm{n}_i$（法向）", fontsize=10.5)
+# 反射光线 v
+ax.add_patch(FancyArrowPatch(O, (4.5, 2.6), arrowstyle="-|>", mutation_scale=16,
+                             color="k", lw=1.6))
+ax.text(4.05, 2.72, "$\bm{r}_i$（反射）", fontsize=10.5)
+# 入射角与反射角相等（圆弧标记）
+ax.add_patch(Arc(O, 1.7, 1.7, angle=0, theta1=90, theta2=126, color="#c00000", lw=1.2))
+ax.text(2.28, 1.28, "$\\theta_i$", fontsize=10, color="#c00000")
+ax.add_patch(Arc(O, 1.7, 1.7, angle=0, theta1=54, theta2=90, color="#c00000", lw=1.2))
+ax.text(2.95, 1.28, "$\\theta_r=\\theta_i$", fontsize=10, color="#c00000")
+# 入射线的镜像延长虚线（示意反射对称关系）
+ax.plot([2.6, 0.7], [0, -2.6], color="#aaaaaa", lw=1.0, linestyle="--")
+ax.plot([0.7, 2.6], [2.6, 0], color="#aaaaaa", lw=1.0, linestyle="--")
+ax.text(3.55, -0.42, "反射角等于入射角", fontsize=9, color="#555555")
+fg.save(fig, "q1_vectors.png")

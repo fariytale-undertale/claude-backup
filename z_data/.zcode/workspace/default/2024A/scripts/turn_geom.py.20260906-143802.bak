@@ -1,0 +1,96 @@
+# -*- coding: utf-8 -*-
+"""问题4/5 共享：p=1.7 m 盘入螺线的 S 形调头曲线几何（含基线 2:1 与最短曲线族）。
+口径：A = 螺线与调头空间边界交点，S 曲线与两螺线相切、两弧互相外切，
+全部弧段位于调头空间内；盘出螺线为盘入绕中心旋转 pi。"""
+import numpy as np
+from dragon_core import (TurnPath, spiral_point, spiral_tangent, spiral_b,
+                         S_arc, TWO_PI)
+
+P_PITCH = 1.7
+R_DISK = 4.5
+b = spiral_b(P_PITCH)
+th_b = R_DISK / b
+A = spiral_point(np.array([th_b]), b)[0]
+T_in = -spiral_tangent(np.array([th_b]), b)[0]      # 盘入行进方向（theta 递减）
+nL = np.array([-T_in[1], T_in[0]])                   # 左法向
+Ap = -A
+w = A - Ap
+
+
+def build_turn(R1, R2, s1, s2, sample_n=20000):
+    """给定两弧半径与法向符号组合构造 S 曲线；几何无效返回 None。
+    有效判据：弧扫角 ∈ (0, pi]；曲线全程位于调头空间内；
+    TurnPath 自洽（L1/L2 复核）；端点切向连续。"""
+    O1 = A + s1 * R1 * nL
+    O2 = Ap + s2 * R2 * nL
+    dv = O2 - O1
+    dist = np.linalg.norm(dv)
+    if abs(dist - (R1 + R2)) > 1e-9 * max(R1 + R2, 1.0):
+        return None                                  # 外切条件不满足
+    T1 = O1 + R1 * dv / dist
+    sig1, sig2 = s1, s2                              # 由行进方向匹配推出 sigma = s
+    a1_0 = np.arctan2((A - O1)[1], (A - O1)[0])
+    a1_1 = np.arctan2((T1 - O1)[1], (T1 - O1)[0])
+    a2_0 = np.arctan2((T1 - O2)[1], (T1 - O2)[0])
+    a2_1 = np.arctan2((Ap - O2)[1], (Ap - O2)[0])
+    d1 = ((a1_1 - a1_0) % TWO_PI) if sig1 > 0 else ((a1_1 - a1_0) % TWO_PI - TWO_PI)
+    d2 = ((a2_1 - a2_0) % TWO_PI) if sig2 > 0 else ((a2_1 - a2_0) % TWO_PI - TWO_PI)
+    if not (0 < abs(d1) <= np.pi + 1e-9 and 0 < abs(d2) <= np.pi + 1e-9):
+        return None                                  # 弧扫角异常（绕远；顺/逆时针由符号定）
+    tp = TurnPath(P_PITCH, R_DISK, R1, R2, O1, O2, sig1, sig2, -6000.0, 6000.0)
+    if abs(tp.L1 - R1 * abs(d1)) > 1e-6 or abs(tp.L2 - R2 * abs(d2)) > 1e-6:
+        return None
+    mus = np.linspace(0.0, tp.L, sample_n)
+    rmax = float(np.max(np.linalg.norm(tp.point(mus), axis=1)))
+    if rmax > R_DISK + 1e-6:
+        return None                                  # 越出调头空间
+    g1 = max(abs(np.dot(tp.tangent(np.array([1e-7]))[0],
+                        tp.tangent(np.array([-1e-7]))[0])),
+             abs(np.dot(tp.tangent(np.array([tp.L - 1e-7]))[0],
+                        tp.tangent(np.array([tp.L + 1e-7]))[0])))
+    return dict(R1=R1, R2=R2, O1=O1, O2=O2, sig1=sig1, sig2=sig2, T1=T1,
+                L1=tp.L1, L2=tp.L2, L=tp.L, rmax=rmax, tp=tp, g1=g1,
+                sweep=(d1, d2))
+
+
+def find_baseline(ratio=2.0):
+    """题给 2:1 基线：符号组合枚举，唯一有效者。"""
+    valid = []
+    for s1, s2 in ((1, -1), (-1, 1)):
+        v = (ratio * s1 - s2) * nL
+        # |w + R2 v| = (ratio+1) R2，|v| = ratio+1 → 线性方程
+        R2 = -np.dot(w, w) / (2 * np.dot(w, v))
+        if R2 <= 0:
+            continue
+        sol = build_turn(ratio * R2, R2, s1, s2)
+        if sol is not None:
+            valid.append(sol)
+    assert len(valid) == 1, f"有效组合数={len(valid)}（预期唯一）"
+    return valid[0]
+
+
+def shortest_curve(base, grid_rel=(0.02, 2.98), step_rel=0.005):
+    """保持三相切的曲线族（R1 = (ratio+1) R2_base − R2），求最短。
+    返回 (R2_star, opt_sol, R2s, Ls)。"""
+    R2_b = base["R2"]
+    k = base["R1"] / R2_b + 1.0                      # R1 = k*R2_b - R2
+    R2s = np.arange(grid_rel[0] * R2_b, grid_rel[1] * R2_b, step_rel * R2_b)
+    Ls = np.full(len(R2s), np.nan)
+    for i, R2 in enumerate(R2s):
+        sol = build_turn(k * R2_b - R2, R2, base["sig1"], base["sig2"], sample_n=6000)
+        if sol is not None:
+            Ls[i] = sol["L"]
+    i_min = int(np.nanargmin(Ls))
+    from scipy.optimize import minimize_scalar
+
+    def L_of(R2):
+        sol = build_turn(k * R2_b - R2, R2, base["sig1"], base["sig2"], sample_n=4000)
+        return sol["L"] if sol is not None else 1e9
+
+    r = minimize_scalar(L_of,
+                        bounds=(R2s[max(i_min - 3, 0)], R2s[min(i_min + 3, len(R2s) - 1)]),
+                        method="bounded", options={"xatol": 1e-8})
+    R2_star = float(r.x)
+    opt = build_turn(k * R2_b - R2_star, R2_star, base["sig1"], base["sig2"],
+                     sample_n=40000)
+    return R2_star, opt, R2s, Ls

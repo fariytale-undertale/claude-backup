@@ -1,0 +1,163 @@
+# -*- coding: utf-8 -*-
+"""main.tex：三问模型建立小节扩写（详细推导 + 显式约束条件）"""
+import io
+
+p = r"D:/z_data/.zcode/workspace/default/2023A/paper/main.tex"
+s = io.open(p, encoding="utf-8").read()
+
+# ---------- 问题一：跟踪法向与余弦效率（整段重写） ----------
+i0 = s.index("\\subsubsection{跟踪法向与余弦效率}")
+i1 = s.index("\\includegraphics[width=0.62\\textwidth]{../output/figures/q1_vectors.png}")
+fig_head = "\\begin{figure}[H]\n\\centering\n"
+NEW_TRACK = """\\subsubsection{跟踪法向与余弦效率}
+依题面，跟踪控制系统使太阳中心点光线经镜面中心反射后指向集热器中心。记镜面中心为 $M_i=(x_i,y_i,z_{0i})$、集热器中心为 $C=(t_x,t_y,80)$，则反射方向单位向量为
+\\begin{equation}
+\\bm{r}_i=\\frac{C-M_i}{\\lVert C-M_i\\rVert}.
+\\label{eq:refl}
+\\end{equation}
+由反射定律，反射角等于入射角，故镜面法向沿指向太阳的单位向量 $\\bm{s}$ 与 $\\bm{r}_i$ 夹角的平分方向：
+\\begin{equation}
+\\bm{n}_i=\\frac{\\bm{s}+\\bm{r}_i}{\\lVert\\bm{s}+\\bm{r}_i\\rVert},\\qquad
+\\eta_{\\cos,i}=\\bm{s}\\cdot\\bm{n}_i=\\bm{r}_i\\cdot\\bm{n}_i=\\cos\\theta_i,
+\\label{eq:cos}
+\\end{equation}
+式中 $\\theta_i$ 为入射角；等号链 $\\bm{s}\\cdot\\bm{n}_i=\\bm{r}_i\\cdot\\bm{n}_i$ 表明法向取角平分方向后，入射方向与反射方向相对法向的夹角相等，恰好满足反射定律。各向量的几何关系如图~\\ref{fig:vec} 所示。
+"""
+s = s[:i0] + NEW_TRACK + s[i1:]
+
+# ---------- 问题一：阴影遮挡效率（整段重写，求交过程编号化） ----------
+i0 = s.index("\\subsubsection{阴影遮挡效率 $\\eta_{\\mathrm{sb}}$}")
+i1 = s.index("\\subsubsection{截断效率 $\\eta_{\\mathrm{trunc}}$}")
+NEW_SB = """\\subsubsection{阴影遮挡效率 $\\eta_{\\mathrm{sb}}$}
+邻镜既可能遮挡入射阳光形成阴影，也可能阻挡反射光线形成阻挡，两类机理见图~\\ref{fig:mech}。将每面镜划分为 $K\\times K$ 个子格并取 $K=12$，以子格中心点 $p$ 代表子格：自该点沿指向太阳的 $\\bm{s}$（判阴影）与沿指向集热器的 $\\bm{r}_i$（判阻挡）发射探测光线，与 50 m 邻域内全部邻镜作求交判定，命中任一邻镜即判该子格损失，故
+\\begin{equation}
+\\eta_{\\mathrm{sb},i}=1-\\frac{\\text{被遮挡子格数}}{K^2}.
+\\label{eq:sb}
+\\end{equation}
+探测光线（起点 $p$、方向 $\\bm{d}$）与邻镜 $j$ 所在平面 $(\\bm{x}-M_j)\\cdot\\bm{n}_j=0$ 的交点参数为
+\\begin{equation}
+\\tau=\\frac{(M_j-p)\\cdot\\bm{n}_j}{\\bm{d}\\cdot\\bm{n}_j},
+\\label{eq:tau}
+\\end{equation}
+交点命中镜 $j$ 矩形受光区域 $Q_j$ 的充要条件为
+\\begin{equation}
+\\tau>0\\ \\text{（阻挡情形另要求 }\\tau<L_i\\text{，即交点位于镜 }A\\text{ 与集热器之间）},\\qquad
+\\bm{q}(\\tau)-M_j\\in Q_j,
+\\label{eq:hit}
+\\end{equation}
+其中 $\\bm{q}(\\tau)=p+\\tau\\bm{d}$ 为交点坐标，其在镜 $j$ 局部标架下的两个坐标分量满足 $|u|\\le w_j/2$、$|v|\\le h_j/2$。对全部子格与全部邻居重复式~\\eqref{eq:tau}、\\eqref{eq:hit} 的判定，命中任一邻居即计该子格损失。遮挡半径敏感性检验表明 40 m 与 60 m 结果完全一致，见 \\S\\ref{sec:q1check}。镜间阻挡与阴影的形成机理如图~\\ref{fig:mech} 所示：阻挡指镜 $A$ 的反射光线在射向集热器的途中被前方邻镜 $B$ 拦截，阴影指邻镜 $B$ 截断了本应射到镜 $A$ 上的入射阳光、在镜面形成阴影带，两类损失在图中分别以高亮色带标出。
+\\begin{figure}[H]
+\\centering
+\\includegraphics[width=0.96\\textwidth]{../output/figures/q1_mechanism.png}
+\\caption{定日镜间反射阻挡与入射阴影的形成机理}
+\\label{fig:mech}
+\\end{figure}
+"""
+s = s[:i0] + NEW_SB + s[i1:]
+
+# ---------- 问题一：截断效率（补 σ 与偏移向量公式，推导加细） ----------
+i0 = s.index("\\subsubsection{截断效率 $\\eta_{\\mathrm{trunc}}$}")
+i1 = s.index("\\subsubsection{效率链与输出热功率}")
+NEW_TR = """\\subsubsection{截断效率 $\\eta_{\\mathrm{trunc}}$}
+截断效率定义为无遮挡反射能量中落在集热器上的比例。将镜面划分为 $K\\times K$ 个等面积子格，第 $k$ 个子格中心为 $c_k$；在过集热器中心 $C$、垂直于 $\\bm{r}_i$ 的平面内，取水平与竖直单位向量 $\\bm{e}_h$、$\\bm{e}_v$，则子格束斑中心相对集热器轮廓中心的偏移向量为
+\\begin{equation}
+\\bm{x}_k=\\bigl[(c_k-C)\\cdot\\bm{e}_h\\bigr]\\,\\bm{e}_h+\\bigl[(c_k-C)\\cdot\\bm{e}_v\\bigr]\\,\\bm{e}_v .
+\\label{eq:xk}
+\\end{equation}
+理想平面镜全镜面法向一致，子格内全部反射光线的方向相同：太阳入射为半角 $\\theta_{\\odot}$ 的圆盘锥形光束（取 $\\theta_{\\odot}=4.65$ mrad），传播距离 $L_i$ 后束斑弥散为半径
+\\begin{equation}
+\\sigma=L_i\\cdot\\tan\\theta_{\\odot}\\approx L_i\\cdot\\theta_{\\odot}
+\\label{eq:sigma}
+\\end{equation}
+的圆盘 $D_\\sigma$，单个子格的无遮挡束斑即其投影与 $D_\\sigma$ 的闵可夫斯基和。以格内中点近似偏移中心并按能量守恒归一化，截断效率为
+\\begin{equation}
+\\eta_{\\mathrm{trunc},i}
+=\\frac{1}{K^2\\cdot\\pi\\cdot\\sigma^2}\\sum_{k=1}^{K^2}
+A\\Bigl(D_\\sigma\\cap\\bigl(T-[\\bm{x}_k]\\bigr)\\Bigr),
+\\label{eq:trunc}
+\\end{equation}
+其中 $T=[-3.5,3.5]\\times[-4,4]$ 为圆柱集热器在该平面内的轮廓矩形，曲率修正不足 $0.1\\%$；$A(\\cdot)$ 为平面面积。该泛函在 $\\sigma\\to 0$ 时严格回归 1，在 $L_i$ 增大时随模糊半径增长而衰减，物理趋势正确。被积函数沿竖直方向分段光滑，用 64 节点辛普森行积分计算。
+"""
+s = s[:i0] + NEW_TR + s[i1:]
+
+# ---------- 问题一：效率链（加编号与适用条件段） ----------
+i0 = s.index("\\subsubsection{效率链与输出热功率}")
+i1 = s.index("\\subsection{模型求解}")
+NEW_CHAIN = """\\subsubsection{效率链与输出热功率}
+综合以上各分量，第 $i$ 面镜的光学效率为五道相互独立的损失关卡的通过率之积：
+\\begin{equation}
+\\eta_i=\\eta_{\\mathrm{sb},i}\\times\\eta_{\\cos,i}\\times\\eta_{\\mathrm{at},i}\\times\\eta_{\\mathrm{trunc},i}\\times\\eta_{\\mathrm{ref}},
+\\label{eq:chain}
+\\end{equation}
+其中大气透射率按题面经验公式计算：
+\\begin{equation}
+\\eta_{\\mathrm{at},i}=0.99321-0.0001176\\cdot d_{\\mathrm{HR},i}+1.97\\times10^{-8}\\cdot d_{\\mathrm{HR},i}^2,
+\\label{eq:at}
+\\end{equation}
+$d_{\\mathrm{HR},i}$ 为镜面中心到集热器中心的距离（式~\\eqref{eq:dhr}），经验公式适用范围为 $d_{\\mathrm{HR}}\\le 1000$ m；镜面反射率取 $\\eta_{\\mathrm{ref}}=0.92$。定日镜场的输出热功率与单位镜面面积年平均输出为
+\\begin{equation}
+E_{\\mathrm{field}}(t)=DNI(t)\\times\\sum_{i=1}^{N}A_i\\cdot\\eta_i(t),\\qquad
+u=\\frac{1}{60\\cdot\\sum_i A_i}\\sum_t E_{\\mathrm{field}}(t).
+\\label{eq:efield}
+\\end{equation}
+场级各分量效率取面积加权平均 $\\eta_x(t)=\\sum_i A_i\\cdot\\eta_{x,i}(t)/\\sum_i A_i$，月均值为该月 5 个时点的算术平均，年均值为 60 个时点的算术平均，即题面口径。
+模型的适用条件为透射率经验公式的定义域 $d_{\\mathrm{HR}}\\le 1000$ m 与 $\\alpha_s>0$：本题 60 个计算时点的 $d_{\\mathrm{HR}}$ 最大约 346 m，最小太阳高度角为 $14.3^\\circ$（12 月 21 日 9:00），全部满足，故 60 个时点均为有效计算点。
+"""
+s = s[:i0] + NEW_CHAIN + s[i1:]
+
+# ---------- 问题二：约束条件逐条说明 + 三角错排间距推导 ----------
+anchor = "\\subsubsection{结构化布局族}"
+insert = """式~\\eqref{eq:con2} 中各约束的依据为：额定功率约束保证镜场达到设计要求；镜心半径约束 $\\lVert(x_i,y_i)\\rVert\\le 350$ 与距塔约束 $\\ge 100$ m 分别对应场区边界与厂房留空；安装高度下限 $z_0\\ge h/2$ 保证镜面绕水平转轴旋转时不触及地面；$w\\ge h$ 为题面对镜面形状的约定。间距约束最难处理——行内相邻镜距、相邻行镜距与跨行对角镜距都必须不小于 $w+5$ m，它决定了布置密度的上限，是问题二优化的核心难点。为在满足全部约束的同时使布置密度最大，本文采用三角错排行网格，其间距合法性可显式验证：记行内间距 $p=w+5+g_{\\mathrm{az}}$（$g_{\\mathrm{az}}\\ge 0$ 为附加余量），奇偶行错开 $p/2$，行距 $d_y=(\\sqrt{3}/2)\\,p+g_{\\mathrm{r}}$（$g_{\\mathrm{r}}\\ge 0$ 为行距余量），则同行相邻镜距为 $p$，相邻行最近镜对的距离为
+\\begin{equation}
+\\sqrt{d_y^2+\\Bigl(\\frac{p}{2}\\Bigr)^2}
+=\\sqrt{\\frac{3p^2}{4}+\\frac{p^2}{4}+\\sqrt{3}\\,p\\,g_{\\mathrm{r}}+g_{\\mathrm{r}}^2}\\ \\ge\\ p\\ \\ge\\ w+5,
+\\label{eq:tri}
+\\end{equation}
+当 $g_{\\mathrm{az}}=g_{\\mathrm{r}}=0$ 时取等号——即三角错排在间距约束下取得最大面密度，$g_{\\mathrm{az}}$、$g_{\\mathrm{r}}$ 取正值时约束严格成立。
+\\subsubsection{结构化布局族}"""
+rep_q2 = "\\subsubsection{结构化布局族}"
+if rep_q2 in s:
+    s = s.replace(rep_q2, insert, 1)
+else:
+    fails.append("Q2 结构化布局族 anchor")
+
+# 问题二约束条件公式加标签
+rep_con = "约束条件为\n\\begin{equation}\n\\begin{cases}\n\\dfrac{1}{60}\\sum_t DNI(t)\\times\\sum_i A\\cdot\\eta_i(t)\\ge 60\\ \\text{MW},"
+if rep_con in s:
+    s = s.replace(rep_con, "约束条件为\n\\begin{equation}\n\\label{eq:con2}\n\\begin{cases}\n\\dfrac{1}{60}\\sum_t DNI(t)\\times\\sum_i A\\cdot\\eta_i(t)\\ge 60\\ \\text{MW},", 1)
+else:
+    fails.append("Q2 cases label anchor")
+
+# ---------- 问题三：插入完整的分带优化模型小节 ----------
+anchor3 = "以问题二最终设计的统一尺寸作为初值，该点已可行"
+insert3 = """\\subsection{模型建立：分带优化模型}
+以各带镜面宽 $w_b$ 与高 $h_b$（$b=1,2,\\dots,6$）为决策变量，安装高度取 $z_{0b}=\\max\\{2,\\ h_b/2+0.05\\}$；单镜效率与场输出热功率的计算同问题一的式~\\eqref{eq:chain}、\\eqref{eq:efield}。优化模型为
+\\begin{equation}
+\\max_{\\;\\{w_b,h_b\\}_{b=1}^{6},\\ t_y}\\;
+u=\\frac{1}{\\sum_b N_b\\,w_b h_b}\\cdot\\frac{1}{60}\\sum_t DNI(t)\\times\\sum_b N_b w_b h_b\\cdot\\bar{\\eta}_b(t)
+\\label{eq:opt3}
+\\end{equation}
+约束条件为
+\\begin{equation}
+\\begin{cases}
+\\dfrac{1}{60}\\sum_t DNI(t)\\times\\sum_b N_b w_b h_b\\cdot\\bar{\\eta}_b(t)\\ge 60\\ \\text{MW},\\\\[2pt]
+2\\le h_b\\le w_b\\le 8,\\qquad 2\\le z_{0b}\\le 6,\\qquad z_{0b}\\ge \\dfrac{h_b}{2},\\\\[2pt]
+\\text{带内行距}=\\dfrac{\\sqrt{3}}{2}\\,(w_b+5),\\qquad
+\\text{跨带行距}\\ge \\max(w_b,w_{b+1})+5,\\\\[2pt]
+\\text{镜心半径}\\le 350\\ \\text{m}，\\qquad \\text{距吸收塔}\\ge 100\\ \\text{m}，
+\\end{cases}
+\\label{eq:con3}
+\\end{equation}
+其中 $\\bar{\\eta}_b(t)$ 为第 $b$ 带内各镜效率的平均值，$N_b$ 为该带镜数。间距约束按如下方式构造性满足：带内行内间距取 $w_b+5$、行距取 $\\frac{\\sqrt{3}}{2}(w_b+5)$ 且奇偶行错开半格，由式~\\eqref{eq:tri} 同理可知带内任意两镜成对距离 $\\ge w_b+5$；跨带过渡行不依赖错位相位，行距直接取 $\\max(w_b,w_{b+1})+5$，保证跨带相邻两镜的距离也不小于两者镜宽较大者加 5 m。
+
+\\subsection{模型求解}
+以问题二最终设计的统一尺寸作为初值，该点已可行"""
+if anchor3 in s:
+    s = s.replace(anchor3, insert3, 1)
+else:
+    fails.append("Q3 模型求解 anchor")
+
+io.open(p, "w", encoding="utf-8").write(s)
+print("patched, failed =", len(fails))
+for f in fails:
+    print("  MISSING:", f)

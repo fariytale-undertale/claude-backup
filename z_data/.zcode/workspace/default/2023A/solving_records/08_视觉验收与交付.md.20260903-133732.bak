@@ -1,0 +1,27 @@
+# 08 视觉验收与交付记录
+
+## 视觉验收（judge 双代理逐页）
+- 第 1–11 页：11/11 pass（轻微：浮动体页底留白、图内小字号，均不影响阅读）
+- 第 12–22 页：11/11 pass（数字交叉核对通过：60.57/60.62 MW、0.5274/0.5276、3462/3419 面、
+  114850.5/114892.4 m2 在正文/表/图逐字一致；无乱码/彩色链接框/匿名违规）
+- 修复项：附录支撑材料清单补录 preprocess.py 与 paper_assets.py（page-21 复验通过）
+
+## 编译终态（xelatex 两遍）
+- errors=0，Missing character=0，Overfull=0，22 页；页码页脚中部摘要页=1；超链接全黑
+
+## 环境问题与规避（沉淀）
+1. 系统 PATH 含坏条目 `D:\stm32tool\cpkg.exe`（文件而非目录）→ MiKTeX 扫描即崩。
+   **未改系统配置**，编译子进程内剔除该条目；建议用户自行从用户 PATH 移除该条目。
+2. 该 CTeX 发行版 booktabs 与嵌套 tabular 均与内核失配（最小样例即崩，重建格式无效）→
+   论文全部表格改单层 tabular+\hline 三线样式；表 2 转置为两列。
+3. `\input` 表体文件首行不能是 `\hline`（misplaced \noalign）——首线须写在 `\input` 之前的主体中。
+4. msys sed 替换中 `\u` 会被吞（\usepackage → \Sepackage）——中文 LaTeX 文件补丁一律用 Python io(utf-8) 补丁文件（T1 规则再次验证）。
+5. numba njit 的模块级全局在编译期冻结，运行期改值无效——需做参数扫描的常数应作为核参数传入。
+
+## 交付物清单
+- 论文：paper/main.pdf（22 页）+ main.tex + tab_*.tex
+- 结果：output/result2.xlsx、output/result3.xlsx（题面模板 8 列）
+- 表格：output/tables/q{1,2,3}_table{1,2,3}.csv + 逐时明细 + 灵敏度 + summary.json
+- 图：output/figures/（三问 layout/components/power/scene_3d + 收敛图 + global_compare + global_flow）
+- 代码：code/（引擎、测试、三问求解与输出、全局检验、论文素材）
+- 记录：solving_records/00–08

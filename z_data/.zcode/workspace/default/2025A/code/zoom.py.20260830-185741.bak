@@ -1,0 +1,154 @@
+# -*- coding: utf-8 -*-
+"""3D 场景图补渲：全景 + 交战区放大 双面板（修复全景图中交战细节不可见问题）。
+数据源：results/result1/2/3.xlsx（经 check_consistency 回读验证）+ Q1 题面参数 + Q2 已验证最优。"""
+import numpy as np
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import openpyxl
+from common import (UAVS, MISSILES, target_samples, T_END, R_CLOUD, V_SINK,
+                    shading_intervals, union_length)
+import plotstyle as ps
+ps.set_figdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'output', 'figures'))
+import matplotlib
+import matplotlib.pyplot as plt
+
+SAMPLES_V = target_samples(48, 4)
+PHI, TH = np.mgrid[0:np.pi:14j, 0:2 * np.pi:20j]
+mdir = {m: -MISSILES[m] / np.linalg.norm(MISSILES[m]) for m in MISSILES}
+
+
+def draw_scene(ax, rows, title, zoom=None, legend=False):
+    """rows: (u, hd, sp, td, tf, mis, iv)；zoom=(x0,x1,y0,y1,z0,z1)"""
+    for m, col in (('M1', 'r'), ('M2', 'darkred'), ('M3', 'orange')):
+        tg = np.linspace(0, T_END[m], 200)
+        mp = MISSILES[m][None, :] + 300 * tg[:, None] * mdir[m][None, :]
+        ax.plot(mp[:, 0], mp[:, 1], mp[:, 2], color=col, lw=1.6,
+                label=f'{m}弹道' if legend else None)
+    ax.scatter(0, 0, 0, color='k', marker='s', s=50, label='假目标' if legend else None)
+    TH_, ZZ_ = np.meshgrid(np.linspace(0, 2 * np.pi, 36), np.linspace(0, 10, 3))
+    ax.plot_surface(7 * np.cos(TH_), 200 + 7 * np.sin(TH_), ZZ_, alpha=0.6, color='slategray')
+    seen_uav = set()
+    lab_cnt = 0
+    for (u, hd, sp, td, tf, mis, iv) in rows:
+        th = np.deg2rad(hd)
+        d = np.array([np.cos(th), np.sin(th), 0.0])
+        tg_u = np.linspace(0, td, 25)
+        up = UAVS[u][None, :] + sp * tg_u[:, None] * d[None, :]
+        ax.plot(up[:, 0], up[:, 1], up[:, 2], color='g', lw=1.8,
+                label=f'{u}航迹' if u not in seen_uav and legend else None)
+        seen_uav.add(u)
+        tg_b = np.linspace(td, td + tf, 30)
+        bp = UAVS[u][None, :] + sp * tg_b[:, None] * d[None, :]
+        bp[:, 2] -= 0.5 * 9.8 * (tg_b - td) ** 2
+        ax.plot(bp[:, 0], bp[:, 1], bp[:, 2], color='orange', lw=1.6,
+                label='干扰弹弹道' if legend and u == rows[0][0] else None)
+        B = bp[-1]
+        tb = td + tf
+        ax.scatter(*B, color='orange', marker='*', s=120)
+        if zoom:
+            # 区间标注/云团仅在放大面板绘制，且起爆点须位于放大窗口内（否则 mplot3d 不裁剪、飘出画面）
+            in_zoom = (zoom[0] <= B[0] <= zoom[1]) and (zoom[2] <= B[1] <= zoom[3]) and (zoom[4] <= B[2] <= zoom[5])
+        else:
+            in_zoom = False
+        if zoom and in_zoom:
+            # 区间标注仅在放大面板绘制（全景面板中会遮挡弹道线）；多弹时错位排布
+            if iv:
+                tt = 0.5 * (iv[0][0] + iv[-1][1])
+                cc = np.array(B) - np.array([0, 0, V_SINK * (tt - tb)])
+                ax.plot_surface(cc[0] + R_CLOUD * np.sin(PHI) * np.cos(TH),
+                                cc[1] + R_CLOUD * np.sin(PHI) * np.sin(TH),
+                                cc[2] + R_CLOUD * np.cos(PHI), alpha=0.3, color='royalblue')
+                ax.text(*(B + [300 * (lab_cnt % 2), 0, 24 + 14 * (lab_cnt % 3)]),
+                        f'遮蔽[{iv[0][0]:.1f},{iv[-1][1]:.1f}]s', fontsize=8)
+                lab_cnt += 1
+            else:
+                ax.text(*(B + [300 * (lab_cnt % 2), 0, 24 + 14 * (lab_cnt % 3)]), '无遮蔽', fontsize=8)
+                lab_cnt += 1
+        elif iv:
+            tt = 0.5 * (iv[0][0] + iv[-1][1])
+            cc = np.array(B) - np.array([0, 0, V_SINK * (tt - tb)])
+            ax.plot_surface(cc[0] + R_CLOUD * np.sin(PHI) * np.cos(TH),
+                            cc[1] + R_CLOUD * np.sin(PHI) * np.sin(TH),
+                            cc[2] + R_CLOUD * np.cos(PHI), alpha=0.3, color='royalblue')
+    ax.set_xlabel('x / m'); ax.set_ylabel('y / m'); ax.set_zlabel('z / m')
+    ps.equal3d(ax)
+    ax.tick_params(labelsize=8)
+    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+        axis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=5))
+    if zoom:
+        ax.set_xlim(zoom[0], zoom[1]); ax.set_ylim(zoom[2], zoom[3]); ax.set_zlim(zoom[4], zoom[5])
+    ax.set_title(title, fontsize=11)
+    if legend:
+        ax.legend(loc='upper left', fontsize=7)
+
+
+def two_panel(fname, rows_all, title, zoom_box, suptitle):
+    fig = plt.figure(figsize=(13, 6))
+    ax1 = fig.add_subplot(121, projection='3d')
+    draw_scene(ax1, rows_all, '全景', legend=True)
+    ax2 = fig.add_subplot(122, projection='3d')
+    draw_scene(ax2, rows_all, f'交战区放大 x∈[{zoom_box[0]},{zoom_box[1]}]', zoom=zoom_box)
+    fig.suptitle(suptitle, fontsize=12)
+    ps.save(fig, fname)
+
+
+def read_xlsx(path, col_u, col_hd, col_sp, col_pd, col_b, col_mis, default_u='FY1'):
+    wb = openpyxl.load_workbook(path)
+    ws = wb.active
+    rows = []
+    for r in range(2, ws.max_row + 1):
+        u = ws.cell(row=r, column=col_u).value if col_u else default_u
+        hd = ws.cell(row=r, column=col_hd).value
+        if not isinstance(hd, (int, float)) or u is None or not str(u).startswith('FY'):
+            continue
+        sp = float(ws.cell(row=r, column=col_sp).value)
+        Pd = np.array([float(ws.cell(row=r, column=c).value) for c in col_pd])
+        B = np.array([float(ws.cell(row=r, column=c).value) for c in col_b])
+        u0 = UAVS[str(u)]
+        td = np.linalg.norm(Pd[:2] - u0[:2]) / sp
+        tf = np.sqrt(max((u0[2] - B[2]) / (0.5 * 9.8), 1e-9))
+        mis = ws.cell(row=r, column=col_mis).value if col_mis else 'M1'
+        rows.append([str(u), float(hd), sp, td, tf, mis, None])
+    return rows
+
+
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def with_intervals(rows):
+    out = []
+    for (u, hd, sp, td, tf, mis, _) in rows:
+        iv, _, _ = shading_intervals(UAVS[u], hd, sp, td, tf, mis, dt=0.02,
+                                     samples=SAMPLES_V, criterion='body')
+        out.append((u, hd, sp, td, tf, mis, iv))
+    return out
+
+# Q1（题面给定参数）
+rows_q1 = with_intervals([('FY1', 180.0, 120.0, 1.5, 3.6, 'M1', None)])
+two_panel('q1_traj_3d.png', rows_q1, '交战区（FY1航迹/弹道/云团/M1近段）',
+          (16900, 18100, -80, 260, 1550, 1900),
+          '问题1：FY1—干扰弹—云团—M1—真目标 3D 场景（τ=1.392s，体判据）')
+
+# Q2（已验证最优，来自 q2_result.md / 问题2记录）
+rows_q2 = with_intervals([('FY1', 7.8088, 70.000, 0.0287, 1.0005, 'M1', None)])
+two_panel('q2_traj_3d.png', rows_q2, '交战区（云团置于M1进近走廊正前方）',
+          (17550, 18250, -60, 160, 1650, 1900),
+          '问题2最优策略 3D 场景（τ=4.559s，hd=7.81° 迎向导弹）')
+
+# Q3（result1.xlsx）
+rows_q3 = with_intervals(read_xlsx(os.path.join(BASE, 'results', 'result1.xlsx'), None, 1, 2, (4, 5, 6), (7, 8, 9), None))
+two_panel('q3_traj_3d.png', rows_q3, '交战区（三弹沿走廊接力）',
+          (15900, 17950, -60, 120, 1500, 1900),
+          '问题3最优策略 3D 场景（三弹并集 τ=6.136s，朝假目标走廊）')
+
+# Q4（result2.xlsx）：全景 + FY2 交战区放大
+rows_q4 = with_intervals(read_xlsx(os.path.join(BASE, 'results', 'result2.xlsx'), 1, 2, 3, (4, 5, 6), (7, 8, 9), None))
+two_panel('q4_traj_3d.png', rows_q4, 'FY2 南向走廊交战区放大',
+          (11300, 12800, -100, 300, 1150, 1500),
+          '问题4最优策略 3D 场景（三机并集 τ=10.547s）')
+
+# Q5（result3.xlsx）：全景 + FY1 走廊交战区放大
+rows_q5 = with_intervals(read_xlsx(os.path.join(BASE, 'results', 'result3.xlsx'), 1, 2, 3, (5, 6, 7), (8, 9, 10), 12))
+two_panel('q5_scene_3d.png', rows_q5, 'FY1 三弹走廊交战区放大',
+          (15800, 18000, -80, 250, 1450, 1900),
+          f'问题5最优方案 3D 场景（总量 τ=20.765s；红/深红/橙=各导弹弹道，*颜色=目标导弹）')
+print("[补渲完成] 5 张 3D 场景图已更新为 全景+放大 双面板")

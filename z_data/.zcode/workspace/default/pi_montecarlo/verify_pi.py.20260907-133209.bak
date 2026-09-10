@@ -1,0 +1,44 @@
+import numpy as np
+
+rng = np.random.default_rng(2026)
+pi = np.pi
+print(f"真值 pi = {pi:.6f}")
+
+# ---- 单次大样本：两种方法 ----
+n = 1_000_000
+xy = rng.uniform(-1, 1, (n, 2))
+inside = (xy ** 2).sum(axis=1) <= 1
+pi_drop = 4 * inside.mean()
+x = rng.uniform(0, 1, n)
+pi_mean = 4 * np.mean(np.sqrt(1 - x ** 2))
+print(f"投点法 4*m/n  = {pi_drop:.6f}   绝对误差 {abs(pi_drop-pi):.2e}")
+print(f"均值法 4*mean = {pi_mean:.6f}   绝对误差 {abs(pi_mean-pi):.2e}")
+
+# ---- 理论标准差常数（用于 Matlab 参考线）----
+var1 = 16 * (pi/4) * (1 - pi/4)          # 投点法 Var = 16*p(1-p)/n, p=pi/4
+var2 = 16 * (2/3 - (pi/4)**2)            # 均值法 Var = 16*Var(sqrt(1-X^2))/n
+print(f"理论std系数: 投点法 {np.sqrt(var1):.4f}/sqrt(n) | 均值法 {np.sqrt(var2):.4f}/sqrt(n)")
+print(f"理论方差比 = {var1/var2:.4f}  (std比 = {np.sqrt(var1/var2):.4f})")
+
+# ---- 重复实验分布 ----
+nrep, m = 500, 10_000
+e1 = np.empty(nrep); e2 = np.empty(nrep)
+for r in range(nrep):
+    xy = rng.uniform(-1, 1, (m, 2))
+    e1[r] = 4 * ((xy**2).sum(axis=1) <= 1).mean()
+    x = rng.uniform(0, 1, m)
+    e2[r] = 4 * np.mean(np.sqrt(1 - x**2))
+print(f"重复500次(n=1e4)实测 std: 投点法 {e1.std(ddof=1):.5f} | 均值法 {e2.std(ddof=1):.5f} | 比值 {e1.std(ddof=1)/e2.std(ddof=1):.2f}")
+print(f"重复实验均值: 投点法 {e1.mean():.6f} | 均值法 {e2.mean():.6f} (应都在 pi 附近)")
+
+# ---- 收敛阶：log-log 斜率 ----
+ns = np.unique(np.round(np.logspace(1, 6, 20)).astype(int))
+err1 = np.empty(len(ns)); err2 = np.empty(len(ns))
+for k, nn in enumerate(ns):
+    xy = rng.uniform(-1, 1, (nn, 2))
+    err1[k] = abs(4 * ((xy**2).sum(axis=1) <= 1).mean() - pi)
+    x = rng.uniform(0, 1, nn)
+    err2[k] = abs(4 * np.mean(np.sqrt(1 - x**2)) - pi)
+s1 = np.polyfit(np.log(ns), np.log(err1), 1)[0]
+s2 = np.polyfit(np.log(ns), np.log(err2), 1)[0]
+print(f"收敛斜率(log-log): 投点法 {s1:.3f} | 均值法 {s2:.3f}  (理论 -0.5)")

@@ -1,0 +1,162 @@
+# -*- coding: utf-8 -*-
+"""公共绘图模块：中文字体、DPI、图保存、同类图统一渲染器（Q1/Q2/Q3 共用）"""
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import numpy as np
+from matplotlib.patches import Circle
+from mpl_toolkits.mplot3d import art3d
+
+for _fp in fm.findSystemFonts():
+    if any(k in _fp for k in ("SimHei", "simhei", "msyh", "YaHei", "SimSun", "simsun")):
+        try:
+            fm.fontManager.addfont(_fp)
+        except Exception:
+            pass
+plt.rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
+plt.rcParams["figure.dpi"] = 300
+
+FIG_DIR = r"D:/z_data/.zcode/workspace/default/2023A/output/figures"
+MONTHS = [f"{m}月" for m in range(1, 13)]
+STS = [9.0, 10.5, 12.0, 13.5, 15.0]
+
+
+def save(fig, name):
+    path = f"{FIG_DIR}/{name}"
+    fig.savefig(path, bbox_inches="tight", dpi=300)
+    plt.close(fig)
+    print("fig saved:", path)
+    return path
+
+
+def plot_layout(mxy, eta_annual, tower_xy, fname, title, sizes=None, vmax=None):
+    """布局图：按逐镜年平均效率着色（同类图 Q1/Q2/Q3 统一）"""
+    fig, ax = plt.subplots(figsize=(6.6, 6.0))
+    sc = ax.scatter(mxy[:, 0], mxy[:, 1], c=eta_annual, s=sizes if sizes is not None else 14,
+                    cmap="viridis", vmin=None if vmax is None else None,
+                    vmax=vmax, linewidths=0)
+    ax.add_patch(Circle((0, 0), 350, fill=False, ls="--", ec="gray", lw=1.2))
+    if np.hypot(tower_xy[0], tower_xy[1]) > 1e-6 or True:
+        ax.add_patch(Circle(tower_xy, 100, fill=False, ls=":", ec="crimson", lw=1.2))
+    ax.plot(*tower_xy, marker="B", color="crimson", ms=9, ls="none", label="吸收塔")
+    ax.set_aspect("equal")
+    ax.set_xlabel("x/m（东）"); ax.set_ylabel("y/m（北）")
+    ax.set_title(title)
+    ax.set_xlim(-370, 370); ax.set_ylim(-370, 370)
+    cb = fig.colorbar(sc, ax=ax, shrink=0.85)
+    cb.set_label("定日镜年平均光学效率")
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(alpha=0.25, ls=":")
+    return save(fig, fname)
+
+
+def plot_components(mon_df, fname, title):
+    """逐月平均效率分量（同类图统一：余弦/阴影遮挡/截断/总效率）"""
+    fig, ax = plt.subplots(figsize=(7.4, 4.2))
+    x = np.arange(1, 13)
+    ax.plot(x, mon_df["eta_cos"], "o-", ms=4, label="余弦效率")
+    ax.plot(x, mon_df["eta_sb"], "s-", ms=4, label="阴影遮挡效率")
+    ax.plot(x, mon_df["eta_tr"], "^-", ms=4, label="截断效率")
+    ax.plot(x, mon_df["eta"], "D-", ms=4, color="crimson", label="光学效率")
+    ax.set_xticks(x); ax.set_xticklabels(MONTHS)
+    ax.set_ylabel("效率（面积加权月均值）")
+    ax.set_ylim(0.5, 1.02)
+    ax.set_title(title)
+    ax.grid(alpha=0.3, ls=":")
+    ax.legend(ncol=4, fontsize=9, loc="lower center")
+    ax.annotate(f"光学效率年均 {mon_df['eta'].mean():.4f}", xy=(0.99, 0.99),
+                xycoords="axes fraction", ha="right", va="top", fontsize=9, color="crimson")
+    return save(fig, fname)
+
+
+def plot_power(df, fname, title):
+    """输出热功率逐时曲线：每月一条线（5 时点），含年均参考线（P7 轴紧贴数据）"""
+    fig, ax = plt.subplots(figsize=(7.0, 4.2))
+    cmap = plt.get_cmap("coolwarm")
+    for m in range(12):
+        d = df[df.month_idx == m].sort_values("ST")
+        ax.plot(d["ST"], d["E_kW"] / 1000.0, "o-", ms=3, lw=1.1,
+                color=cmap(m / 11.0), label=MONTHS[m])
+    ebar = df["E_kW"].mean() / 1000.0
+    ax.axhline(ebar, color="k", ls="--", lw=1.0)
+    ax.annotate(f"年平均 {ebar:.2f} MW", xy=(0.985, ebar), xycoords=("axes fraction", "data"),
+                va="bottom", ha="right", fontsize=9)
+    ax.set_xticks(STS); ax.set_xticklabels([f"{s:g}时" for s in STS])
+    ax.set_xlabel("当地时间（每月 21 日）"); ax.set_ylabel("输出热功率/MW")
+    lo, hi = df["E_kW"].min() / 1000.0, df["E_kW"].max() / 1000.0
+    ax.set_ylim(lo - 0.03 * (hi - lo) - 0.5, hi + 0.06 * (hi - lo))
+    ax.set_title(title)
+    ax.grid(alpha=0.3, ls=":")
+    ax.legend(ncol=4, fontsize=7.5, loc="upper center", framealpha=0.75)
+    return save(fig, fname)
+
+
+def _cylinder(ax, cx, cy, r, z0, z1, color="darkorange", n=36, alpha=0.9):
+    th = np.linspace(0, 2 * np.pi, n)
+    zs = np.linspace(z0, z1, 2)
+    TH, ZS = np.meshgrid(th, zs)
+    ax.plot_surface(cx + r * np.cos(TH), cy + r * np.sin(TH), ZS,
+                    color=color, alpha=alpha, linewidth=0, shade=True)
+
+
+def _mirror_patch(ax, M, wv, hv, w, h, color="steelblue", alpha=0.95):
+    c = M - (w / 2) * wv - (h / 2) * hv
+    corners = np.array([c,
+                        c + w * wv,
+                        c + w * wv + h * hv,
+                        c + h * hv])
+    poly = art3d.Poly3DCollection([corners], facecolor=color, edgecolor="k", alpha=alpha)
+    ax.add_collection3d(poly)
+
+
+def scene_3d(mxy, z0, tower_xy, sun_vec, fname, sample_idx=0, label=""):
+    """双面板 3D 示意：全场（比例真实）+ 塔顶-定日镜几何细部（等比例）。
+    同类图 Q1/Q2/Q3 统一，仅塔位/标题不同。"""
+    fig = plt.figure(figsize=(11.6, 4.8))
+    tx, ty = tower_xy
+    # ---- A 全场 ----
+    axA = fig.add_subplot(121, projection="3d")
+    th = np.linspace(0, 2 * np.pi, 200)
+    axA.plot(350 * np.cos(th), 350 * np.sin(th), 0, color="gray", lw=1.0)
+    axA.plot(mxy[:, 0], mxy[:, 1], np.full(len(mxy), float(np.ravel(z0)[0]) if np.ndim(z0) else float(z0)),
+             ".", ms=1.6, color="steelblue")
+    axA.plot([tx, tx], [ty, ty], [0, 80], "k-", lw=2)
+    _cylinder(axA, tx, ty, 3.5, 76, 84)
+    axA.set_box_aspect((720, 720, 200))
+    axA.set_xlim(-360, 360); axA.set_ylim(-360, 360); axA.set_zlim(0, 200)
+    axA.set_xlabel("x/m"); axA.set_ylabel("y/m"); axA.set_zlabel("z/m")
+    axA.view_init(elev=22, azim=-58)
+    axA.set_title(f"定日镜场全景{label}")
+    # ---- B 细部 ----
+    axB = fig.add_subplot(122, projection="3d")
+    i = sample_idx
+    M = np.array([mxy[i, 0], mxy[i, 1], float(np.ravel(z0)[i]) if np.ndim(z0) else float(z0)])
+    C = np.array([tx, ty, 80.0])
+    r = C - M; r = r / np.linalg.norm(r)
+    n = sun_vec + r; n = n / np.linalg.norm(n)
+    wl = np.hypot(n[0], n[1]); wv = np.array([-n[1] / wl, n[0] / wl, 0.0]); hv = np.cross(n, wv)
+    _mirror_patch(axB, M, wv, hv, 6.0, 6.0)
+    axB.plot([tx, tx], [ty, ty], [60, 80], "k-", lw=2)
+    _cylinder(axB, tx, ty, 3.5, 76, 84)
+    L1 = 55.0
+    axB.plot(*zip(M + L1 * sun_vec, M), color="gold", lw=1.6)
+    axB.plot(*zip(M, C), color="firebrick", lw=1.6)
+    axB.plot(*zip(M, M + 14 * n), color="navy", lw=1.4, ls="--")
+    for pt, lab, dz in [(M + 30 * sun_vec, "入射光线", 0),
+                        (M + 0.55 * (C - M), "反射光线", 3),
+                        (M + 14.6 * n, "法向 n", 0)]:
+        axB.text(pt[0], pt[1], pt[2] + dz, lab, fontsize=8.5)
+    axB.text(tx, ty, 85.5, "集热器", fontsize=8.5, ha="center")
+    mid = (M + C) / 2
+    span = max(60.0, np.abs(M - C).max() * 0.75)
+    cx0, cy0 = (M[0] + tx) / 2, (M[1] + ty) / 2
+    axB.set_xlim(cx0 - span, cx0 + span); axB.set_ylim(cy0 - span, cy0 + span)
+    axB.set_zlim(0, 2 * span)
+    axB.set_box_aspect((1, 1, 1))
+    axB.set_xlabel("x/m"); axB.set_ylabel("y/m"); axB.set_zlabel("z/m")
+    axB.view_init(elev=16, azim=-55)
+    axB.set_title("入射-反射-法向几何（等比例）")
+    fig.tight_layout()
+    return save(fig, fname)

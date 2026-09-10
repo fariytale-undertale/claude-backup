@@ -1,0 +1,131 @@
+# -*- coding: utf-8 -*-
+"""求解器模块：向量化快速遮蔽评估 + Nelder-Mead + 参数变换 + 结构热启动。
+G-Cost 闸门交付物：单次评估耗时、形态诊断、求解器选择论证由各问脚本打印。"""
+import numpy as np
+from common import (G, R_CLOUD, V_SINK, T_EFF, V_MISSILE, V_UAV_MIN, V_UAV_MAX,
+                    T_FUSE_MIN, MISSILES, UAVS, TGT_MID, target_samples,
+                    burst_point, missile_pos, T_END, union_length)
+
+# ---------------- 向量化快速评估 ----------------
+def _mask_grid(uav0, hd, sp, td, tf, missile, tg, samples):
+    """在给定时间网格上计算体判据布尔遮蔽 (T,)。"""
+    B, t_b = burst_point(uav0, hd, sp, td, tf)
+    c = np.array(B)[None, :] - np.zeros((tg.size, 3))
+    c[:, 2] -= V_SINK * (tg - t_b)
+    m = missile_pos(missile, tg)
+    # dist(c_t, seg[m_t, q_n]) 全向量化 (T,N)
+    AB = samples[None, :, :] - m[:, None, :]
+    AC = c[:, None, :] - m[:, None, :]
+    denom = np.einsum('tnj,tnj->tn', AB, AB)
+    s = np.clip(np.einsum('tnj,tnj->tn', AC, AB) / denom, 0.0, 1.0)
+    proj = m[:, None, :] + s[..., None] * AB
+    d = np.linalg.norm(c[:, None, :] - proj, axis=2)
+    return (d <= R_CLOUD).all(axis=1)
+
+
+def coarse_intervals(uav0, hd, sp, td, tf, missile='M1', dt=0.05, samples=None):
+    """快速遮蔽区间（网格分辨率端点，无二分，用于优化中评估）。"""
+    if samples is None:
+        samples = target_samples()
+    B, t_b = burst_point(uav0, hd, sp, td, tf)
+    t0, t1 = t_b, min(t_b + T_EFF, T_END[missile])
+    if t1 <= t0:
+        return []
+    tg = np.arange(t0, t1 + dt / 2, dt)
+    mask = _mask_grid(uav0, hd, sp, td, tf, missile, tg, samples)
+    iv, i, n = [], 0, len(tg)
+    while i < n:
+        if mask[i]:
+            j = i
+            while j + 1 < n and mask[j + 1]:
+                j += 1
+            iv.append((float(tg[i]), float(tg[j] + dt)))
+            i = j + 1
+        else:
+            i += 1
+    return iv
+
+
+def tau_of(bombs, missile='M1', dt=0.05, samples=None):
+    """多弹并集遮蔽时长（快速版）。bombs: list of (uav0, hd, sp, td, tf)。"""
+    ivs = []
+    for uav0, hd, sp, td, tf in bombs:
+        ivs += coarse_intervals(uav0, hd, sp, td, tf, missile, dt, samples)
+    return union_length(ivs)
+
+
+# ---------------- 参数变换（把约束化入参数域，免罚函数）----------------
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def y_to_bomb(uav0, y):
+    """y=(θ, y_v, y_td, y_tf) → (hd, sp, td, tf)。
+    v=70+70·sigmoid ∈(70,140)；td=y²≥0；tf=1+y²≥1。θ 无约束（mod 360）。"""
+    hd = y[0] % 360.0
+    sp = V_UAV_MIN + (V_UAV_MAX - V_UAV_MIN) * sigmoid(y[1])
+    td = y[2] ** 2
+    tf = T_FUSE_MIN + y[3] ** 2
+    return hd, sp, td, tf
+
+
+# ---------------- Nelder-Mead ----------------
+def nelder_mead(f, x0, max_iter=600, tol_x=1e-10, tol_f=1e-12, step=0.2):
+    """标准 NM（反射/扩张/收缩/缩边）。返回 (x_best, f_best, nfev, hist)。"""
+    n = len(x0)
+    x0 = np.asarray(x0, dtype=float)
+    simp = [x0.copy()]
+    for i in range(n):
+        p = x0.copy()
+        p[i] += step * (abs(x0[i]) + 1.0)
+        simp.append(p)
+    simp = np.array(simp)
+    fv = np.array([f(p) for p in simp])
+    nfev = n + 1
+    hist = [fv.min()]
+    for it in range(max_iter):
+        order = np.argsort(fv)
+        simp, fv = simp[order], fv[order]
+        if np.max(np.abs(simp[1:] - simp[0])) < tol_x and abs(fv[-1] - fv[0]) < tol_f:
+            break
+        cen = simp[:-1].mean(axis=0)
+        xr = cen + (cen - simp[-1])          # 反射
+        fr = f(xr); nfev += 1
+        if fr < fv[0]:
+            xe = cen + 2 * (cen - simp[-1])  # 扩张
+            fe = f(xe); nfev += 1
+            simp[-1], fv[-1] = (xe, fe) if fe < fr else (xr, fr)
+        elif fr < fv[-2]:
+            simp[-1], fv[-1] = xr, fr
+        else:
+            xc = cen + 0.5 * (simp[-1] - cen)  # 收缩
+            fc = f(xc); nfev += 1
+            if fc < fv[-1]:
+                simp[-1], fv[-1] = xc, fc
+            else:                              # 缩边
+                for k in range(1, n + 1):
+                    simp[k] = simp[0] + 0.5 * (simp[k] - simp[0])
+                    fv[k] = f(simp[k]); nfev += 1
+        hist.append(fv.min())
+    order = np.argsort(fv)
+    return simp[order[0]], fv[order[0]], nfev, np.array(hist)
+
+
+# ---------------- 结构热启动：由期望起爆点/时刻反解参数 ----------------
+def warm_start_from_burst(uav_name, B, t_b):
+    """给定起爆点 B 与起爆时刻 t_b，反解 (hd, sp, td, tf)；不可行返回 None。
+    原理：水平位置 uav0+t·v·(cosθ,sinθ)（连续），竖直 1800−½g·tf²。"""
+    u0 = UAVS[uav_name]
+    t_f = np.sqrt(max(0.0, 2.0 * (u0[2] - B[2])) / G)
+    if t_f < T_FUSE_MIN - 1e-9:
+        return None
+    t_d = t_b - t_f
+    if t_d < 0:
+        return None
+    dxy = np.array(B[:2]) - u0[:2]
+    dist = np.linalg.norm(dxy)
+    sp = dist / t_b
+    if not (V_UAV_MIN - 1e-6 <= sp <= V_UAV_MAX + 1e-6):
+        return None
+    hd = np.degrees(np.arctan2(dxy[1], dxy[0])) % 360.0
+    return (hd, sp, t_d, max(t_f, T_FUSE_MIN))

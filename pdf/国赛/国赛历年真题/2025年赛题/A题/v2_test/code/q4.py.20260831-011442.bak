@@ -1,0 +1,296 @@
+# -*- coding: utf-8 -*-
+"""问题4：FY1/FY2/FY3 各 1 弹对 M1 遮蔽时长最大化（并集口径）——最终版。
+
+继承：运动学/双判据/结构反解（struct_td）。差异：三机独立 (theta_i, v_i, t_d_i, tau_i)，
+无共享航向、无间隔约束；协同收益 = 三弹区间错峰（并集最大化）。
+
+可达性诊断（先行）：v∈[70,140] 下三机视线可达窗口 FY1 t_b∈[5.5,11.5]、FY2∈[11,45]、FY3∈[23,45]
+天然错峰 -> 联合最优 ≈ 各机独立最优之和（需验证重叠）。
+
+求解器：每机独立 NM（12 起点 = 4 (th,v,t_b) 组合 x 3 机，struct_td 生成）-> 三机独立最优
+     -> 联合 12 维 NM（独立解为起点，检查重叠改善）-> 取优。
+G2：独立解之和（上界近似）vs 联合解 互证；G2 异源网格；G5 边界哨兵。
+"""
+import sys, os, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import numpy as np
+from scipy.optimize import minimize
+from core import (burst_pos, T_HIT, CYL_PTS, shaded_intervals,
+                  union_length, grid_union_length, V_UAV_MIN, V_UAV_MAX,
+                  G, UAVS, missile_pos, SINK, T_EFF, CENTER_PT)
+import matplotlib.pyplot as plt
+import figures as F
+import pandas as pd
+
+t0 = time.time()
+t_hit = T_HIT['M1']
+PT = CENTER_PT
+UAV_IDS = ['FY1', 'FY2', 'FY3']
+
+
+def intervals_for(uid, theta, v, td, tau, grid_dt=0.005):
+    if td < 0 or tau <= 0:
+        return []
+    B = burst_pos(uid, td, tau, theta, v)
+    if B[2] < 0:
+        return []
+    return shaded_intervals(B, td + tau, 'M1', CYL_PTS, t_hit, grid_dt=grid_dt)
+
+
+def struct_td(uid, th, v, t_b):
+    """给定 (uid, th, v, t_b)：s 由水平视线方程解出，(tau, td) 由压线高度反解。"""
+    P0 = UAVS[uid]
+    M = missile_pos('M1', float(t_b))
+    u = np.array([np.cos(th), np.sin(th)])
+    B_h = P0[:2] + v * t_b * u
+    A = (PT[:2] - M[:2]).reshape(2, 1)
+    s = float(np.linalg.lstsq(A, B_h - M[:2], rcond=None)[0][0])
+    if not (0.0 <= s <= 1.0):
+        return None
+    z_line = M[2] + s * (PT[2] - M[2])
+    if z_line >= P0[2] or z_line <= 0:
+        return None
+    tau2 = 2.0 * (P0[2] - z_line) / G
+    tau = np.sqrt(tau2)
+    td = t_b - tau
+    if td < 0:
+        return None
+    v_need = np.linalg.norm(B_h - P0[:2]) / t_b
+    if not (V_UAV_MIN - 1e-6 <= v_need <= V_UAV_MAX + 1e-6):
+        return None
+    return td, tau, s, v_need
+
+
+# ---------------- 阶段1: 各机独立优化（结构起点 + 兜底粗扫） ----------------
+ind_best = {}
+for uid in UAV_IDS:
+    P0 = UAVS[uid]
+    th_toward = np.degrees(np.arctan2(PT[1] - P0[1], PT[0] - P0[0]))
+    starts = []
+    rng_u = np.random.default_rng(sum(ord(c) for c in uid))   # 稳定种子(hash(str)进程间随机)
+    for th_off in [0, -10, 10, -20, 20]:          # 航向扰动（朝目标方向为基准）
+        for v_s in [70, 100, 140]:
+            for t_b in np.arange(3.0, 44.0, 1.5):
+                r = struct_td(uid, np.radians(th_toward + th_off), v_s, t_b)
+                if r is None:
+                    continue
+                td, tau, s, vv = r
+                starts.append((np.radians(th_toward + th_off +
+                                          rng_u.normal(0, 2)), v_s, td, tau, t_b, s))
+    print(f"[{uid}] 结构起点 {len(starts)} 个")
+    # 快速评估（体判据粗网格排序）
+    scored = []
+    for th, v_s, td, tau, t_b, s in starts:
+        B = burst_pos(uid, td, tau, th, v_s)
+        if B[2] < 0:
+            continue
+        ivs = shaded_intervals(B, td + tau, 'M1', CYL_PTS, t_hit, grid_dt=0.02)
+        d = union_length(ivs)
+        if d > 0:
+            scored.append((d, th, v_s, td, tau))
+    # FY2/FY3 专项起点（struct_td 常规扰动扫不出窄窗口，来自 4 维专项粗扫诊断）
+    special = {'FY2': [(194.0, 140.0, 40.5), (190.0, 140.0, 35.0), (198.0, 130.0, 42.0)],
+               'FY3': [(135.0, 105.0, 42.0), (122.5, 85.0, 43.0),
+                       (137.5, 105.0, 44.0), (132.5, 85.0, 49.0)]}
+    for th_d, v_s, tb in special.get(uid, []):
+        r = struct_td(uid, np.radians(th_d), v_s, tb)
+        if r is not None:
+            td, tau, s, vv = r
+            scored.append((0.0, np.radians(th_d), v_s, td, tau))
+    scored.sort(key=lambda x: -x[0])
+    print(f"[{uid}] 非零起点 {len(scored)} 个，粗最优 {scored[0][0]:.3f}s" if scored
+          else f"[{uid}] 警告: 全部起点零时长!")
+    best_u = None
+    for d0, th0, v0, td0, tau0 in (scored[:3] if scored else []):
+        def neg4(x, uid=uid):
+            th, v, td, tau = x
+            pen = 0.0
+            if not (V_UAV_MIN <= v <= V_UAV_MAX):
+                pen += 500.0 * max(V_UAV_MIN - v, v - V_UAV_MAX, 0) ** 2 + 0.5
+            if tau <= 0:
+                pen += 1.0 + (-tau) ** 2
+            if td < 0:
+                pen += 1.0 + (-td) ** 2
+            zB = UAVS[uid][2] - 0.5 * G * tau ** 2
+            if zB < 0:
+                pen += 1.0 + (-zB) ** 2 * 0.01
+            ivs = intervals_for(uid, th % (2 * np.pi), v, td, tau, 0.02)
+            return -(union_length(ivs) - pen)
+        res = minimize(neg4, np.array([th0, v0, td0, tau0]), method='Nelder-Mead',
+                       options={'maxfev': 400, 'xatol': 1e-6, 'fatol': 1e-9})
+        th_r = res.x[0] % (2 * np.pi)
+        ivs = intervals_for(uid, th_r, res.x[1], res.x[2], res.x[3], 0.005)
+        d = union_length(ivs)
+        if best_u is None or d > best_u[0]:
+            best_u = (d, res.x.copy())
+    assert best_u is not None, f"{uid} 无有效解"
+    ind_best[uid] = best_u
+    print(f"[独立 {uid}] {best_u[0]:.4f}s @ th={np.degrees(best_u[1][0])%360:.2f} "
+          f"v={best_u[1][1]:.2f} td={best_u[1][2]:.3f} tau={best_u[1][3]:.3f}")
+print(f"[阶段1] 各机独立优化耗时 {time.time()-t0:.1f}s，独立和 = "
+      f"{sum(ind_best[u][0] for u in UAV_IDS):.4f}s")
+
+# ---------------- 阶段2: 联合 12 维 NM（独立解为起点，罚重叠+错峰激励） ----------------
+def joint_eval(x, grid_dt=0.02):
+    """x = 3x(theta,v,td,tau)。返回 -(并集) - 罚。"""
+    pen = 0.0
+    ivs_all = []
+    for i, uid in enumerate(UAV_IDS):
+        th, v, td, tau = x[4 * i:4 * i + 4]
+        if not (V_UAV_MIN <= v <= V_UAV_MAX):
+            pen += 500.0 * max(V_UAV_MIN - v, v - V_UAV_MAX, 0) ** 2 + 0.5
+        if tau <= 0 or td < 0:
+            pen += 1.0
+        zB = UAVS[uid][2] - 0.5 * G * tau ** 2
+        if zB < 0:
+            pen += 1.0
+        ivs_all += intervals_for(uid, th % (2 * np.pi), v, td, tau, grid_dt)
+    return -(union_length(ivs_all) - pen)
+
+x0 = np.array([xx for uid in UAV_IDS for xx in ind_best[uid][1]])
+res = minimize(joint_eval, x0, method='Nelder-Mead',
+               options={'maxfev': 1500, 'xatol': 1e-6, 'fatol': 1e-9})
+xj = res.x
+print(f"[阶段2] 联合 NM 粗值 {-res.fun:.4f}s，耗时 {time.time()-t2:.1f}s"
+      if (t2 := time.time()) else "")
+
+# ---------------- 阶段3: 精确复算对比，取优 ----------------
+def exact_total(x):
+    ivs_per = []
+    for i, uid in enumerate(UAV_IDS):
+        th, v, td, tau = x[4 * i:4 * i + 4]
+        ivs_per.append(intervals_for(uid, th % (2 * np.pi), v, td, tau, 0.002))
+    return union_length([iv for e in ivs_per for iv in e]), ivs_per
+
+dur_ind, ivs_ind = exact_total(x0)
+dur_joint, ivs_joint = exact_total(xj)
+if dur_joint >= dur_ind:
+    xf, dur_final, ivs_per, tag = xj, dur_joint, ivs_joint, '联合NM'
+else:
+    xf, dur_final, ivs_per, tag = x0, dur_ind, ivs_ind, '独立解'
+print(f"[G2] 独立解并集 {dur_ind:.4f} vs 联合解 {dur_joint:.4f} -> 采用 {tag} {dur_final:.4f}s")
+
+# G2 互证
+bursts = []
+for i, uid in enumerate(UAV_IDS):
+    th, v, td, tau = xf[4 * i:4 * i + 4]
+    bursts.append((burst_pos(uid, td, tau, th % (2 * np.pi), v), td + tau, uid))
+dur_grid_check, _ = grid_union_length([(b, tb) for b, tb, _ in bursts], 'M1', CYL_PTS,
+                                      t_hit, dt=0.0005)
+print(f"[G2互证] 网格 {dur_grid_check:.4f}  |差| {abs(dur_final-dur_grid_check):.2e}")
+assert abs(dur_final - dur_grid_check) < 8e-4
+
+# 输出各机详情
+rows = []
+per_durs = []
+for i, uid in enumerate(UAV_IDS):
+    th, v, td, tau = xf[4 * i:4 * i + 4]
+    th = th % (2 * np.pi)
+    B = burst_pos(uid, td, tau, th, v)
+    D = UAVS[uid] + v * td * np.array([np.cos(th), np.sin(th), 0.0])
+    di = union_length(ivs_per[i])
+    per_durs.append(di)
+    print(f"  {uid}: th={np.degrees(th)%360:.3f}° v={v:.3f} td={td:.4f} tau={tau:.4f} "
+          f"t_b={td+tau:.4f} D=({D[0]:.1f},{D[1]:.1f},1800) B=({B[0]:.1f},{B[1]:.1f},{B[2]:.1f}) "
+          f"单独={di:.4f}s")
+    rows.append([uid, np.degrees(th) % 360, v, D[0], D[1], D[2],
+                 B[0], B[1], B[2], di])
+print(f"[最终解] 并集 = {dur_final:.4f}s (逐弹和 {sum(per_durs):.4f}, "
+      f"重叠 {sum(per_durs)-dur_final:.4f})")
+
+# 哨兵
+flags = []
+for i, uid in enumerate(UAV_IDS):
+    th, v, td, tau = xf[4 * i:4 * i + 4]
+    if abs(v - V_UAV_MIN) < 0.5 or abs(v - V_UAV_MAX) < 0.5:
+        flags.append(f'{uid} v={v:.1f} 卡边界')
+    if td < 0.05:
+        flags.append(f'{uid} td={td:.3f} 卡0')
+print(f"[G5] {'; '.join(flags) if flags else '无卡边界'}")
+
+# ---------------- result2.xlsx + 图表 ----------------
+out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'output')
+tab_dir = os.path.join(out_dir, 'tables')
+pd.DataFrame(rows, columns=['无人机编号', '无人机运动方向', '无人机运动速度 (m/s)',
+                            '烟幕干扰弹投放点的x坐标 (m)', '烟幕干扰弹投放点的y坐标 (m)',
+                            '烟幕干扰弹投放点的z坐标 (m)', '烟幕干扰弹起爆点的x坐标 (m)',
+                            '烟幕干扰弹起爆点的y坐标 (m)', '烟幕干扰弹起爆点的z坐标 (m)',
+                            '有效干扰时长 (s)']).to_excel(
+    os.path.join(out_dir, 'result2.xlsx'), index=False)
+
+F.gantt(ivs_per, UAV_IDS, [[xf[4*i+2]] for i in range(3)],
+        '问题4: 三机遮蔽区间甘特图（并集总时长 %.3f s）' % dur_final, 'q4_gantt.png')
+
+# 轨迹图
+fig, (ax_z, ax_g) = plt.subplots(2, 1, figsize=(14, 13))
+tm = np.linspace(0, t_hit, 800)
+Mm = missile_pos('M1', tm)
+ax_g.plot(Mm[:, 0], Mm[:, 1], color=F.C_RED, lw=1.2, alpha=0.55, label='M1 弹道')
+for k, (a, b) in enumerate(sorted(iv for e in ivs_per for iv in e)):
+    Ms = missile_pos('M1', np.linspace(a, b, 60))
+    ax_g.plot(Ms[:, 0], Ms[:, 1], color=F.C_RED, lw=3.5, alpha=0.95,
+              label='M1 遮蔽段' if k == 0 else None)
+for i, uid in enumerate(UAV_IDS):
+    th, v, td, tau = xf[4 * i:4 * i + 4]
+    th = th % (2 * np.pi)
+    B = burst_pos(uid, td, tau, th, v)
+    t_line = td + 2
+    ax_g.plot([UAVS[uid][0], UAVS[uid][0] + v * t_line * np.cos(th)],
+              [UAVS[uid][1], UAVS[uid][1] + v * t_line * np.sin(th)],
+              color=F.SERIES[i], lw=2, alpha=0.85)
+    ax_g.scatter([UAVS[uid][0]], [UAVS[uid][1]], marker='s', s=70, c=F.SERIES[i],
+                 edgecolor='black', zorder=6)
+    ax_g.scatter([B[0]], [B[1]], marker='*', s=190, c=F.SERIES[i], edgecolor='black', zorder=6)
+    ax_g.annotate(uid, (B[0], B[1]), textcoords='offset points', xytext=(6, 6),
+                  fontsize=8, color=F.SERIES[i])
+F.draw_targets(ax_g)
+ax_g.annotate('真目标(0,200)', xy=(0.03, 0.05), xycoords='axes fraction', fontsize=8,
+              bbox=dict(boxstyle='round', facecolor='lightyellow', edgecolor='darkgreen'))
+F.setup_map_axes(ax_g, '问题4: 全局态势 (xy)')
+ax_g.legend(loc='upper left', fontsize=8)
+
+zx0, zx1 = 15500, 18200
+inw = (Mm[:, 0] > zx0) & (Mm[:, 0] < zx1)
+ax_z.plot(Mm[inw, 0], Mm[inw, 2], color=F.C_RED, lw=1.8, alpha=0.6, label='M1 弹道')
+for k, (a, b) in enumerate(sorted(iv for e in ivs_per for iv in e)):
+    Ms = missile_pos('M1', np.linspace(a, b, 60))
+    ax_z.plot(Ms[:, 0], Ms[:, 2], color=F.C_RED, lw=3.5, alpha=0.95,
+              label='M1 遮蔽段' if k == 0 else None)
+for i, uid in enumerate(UAV_IDS):
+    th, v, td, tau = xf[4 * i:4 * i + 4]
+    th = th % (2 * np.pi)
+    B = burst_pos(uid, td, tau, th, v)
+    D = UAVS[uid] + v * td * np.array([np.cos(th), np.sin(th), 0.0])
+    tp = np.linspace(0, tau, 30)
+    ax_z.plot(D[0] + v * tp * np.cos(th), UAVS[uid][2] - 0.5 * G * tp ** 2,
+              color=F.SERIES[i], lw=1.6, alpha=0.9)
+    ax_z.scatter([B[0]], [B[2]], marker='*', s=240, c=F.SERIES[i], edgecolor='black', zorder=6)
+    ax_z.annotate(f'{uid} t_b={td+tau:.1f}s', (B[0], B[2]), textcoords='offset points',
+                  xytext=(6, 8), fontsize=8, color=F.SERIES[i])
+for (b, tb, uid) in bursts:
+    tc = np.linspace(tb, min(tb + T_EFF, t_hit), 30)
+    Cc = b + np.array([0, 0, -SINK]) * (tc - tb)[:, None]
+    ax_z.plot(Cc[:, 0], Cc[:, 2], color=F.C_CLOUD, lw=1.1, alpha=0.7)
+ax_z.set_xlabel('x (m)')
+ax_z.set_ylabel('z (m)')
+ax_z.set_title('问题4: 三机投放-起爆 xz 侧视图（FY2/FY3 起爆点在窗口左界外时省略）',
+               fontweight='bold')
+ax_z.grid(True, ls='--', alpha=0.3)
+ax_z.set_aspect('equal')
+ax_z.legend(loc='lower left', fontsize=8)
+ax_z.set_xlim(zx0, zx1)
+F.save(fig, 'q4_trajectory.png')
+
+pd.DataFrame([
+    ['FY1 (th, v, td, tau)', f'({np.degrees(xf[0]%2*np.pi)%360:.4f}, {xf[1]:.4f}, {xf[2]:.4f}, {xf[3]:.4f})'],
+    ['FY2 (th, v, td, tau)', f'({np.degrees(xf[4]%2*np.pi)%360:.4f}, {xf[5]:.4f}, {xf[6]:.4f}, {xf[7]:.4f})'],
+    ['FY3 (th, v, td, tau)', f'({np.degrees(xf[8]%2*np.pi)%360:.4f}, {xf[9]:.4f}, {xf[10]:.4f}, {xf[11]:.4f})'],
+    ['并集遮蔽时长 (s)', f'{dur_final:.4f}'],
+    ['独立解并集 (s)', f'{dur_ind:.4f}'],
+    ['联合解并集 (s)', f'{dur_joint:.4f}'],
+    ['采用方案', tag],
+    ['G2网格互证 (s)', f'{dur_grid_check:.4f}'],
+], columns=['量', '值']).to_csv(os.path.join(tab_dir, 'q4_results.csv'), index=False,
+                               encoding='utf-8-sig')
+print("  [表] result2.xlsx / q4_results.csv / q4_gantt.png / q4_trajectory.png")
+print(f"\n总运行时间: {time.time()-t0:.1f} s")

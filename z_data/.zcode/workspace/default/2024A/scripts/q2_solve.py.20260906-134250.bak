@@ -1,0 +1,208 @@
+# -*- coding: utf-8 -*-
+"""问题2：盘入终止时刻（首个板凳相切时刻）。
+产出：output/result2.xlsx、figures/fig_q2_*.png。
+主判据=板凳矩形（D=0 相切），对照判据=扩展中心线段距离<0.30 m。"""
+import numpy as np
+import openpyxl
+import os, re, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dragon_core import (Spiral, ReversedPath, walk_chain, chain_points,
+                         chain_speeds, chord_residual, min_bench_distance,
+                         min_centerline_distance, S_arc)
+from figures_common import save_fig, draw_spiral, COLORS
+import matplotlib.pyplot as plt
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ATT = "D:/pdf/国赛/国赛历年真题/2024年赛题/A题/附件"
+t_start = time.time()
+
+sp = Spiral(0.55)
+rp = ReversedPath(sp)
+S_A = float(S_arc(32 * np.pi, sp.b))
+
+
+def config_at(t):
+    """t 时刻位形（标量）。返回 X (224,2), speeds (224,)。"""
+    mu = walk_chain(rp, np.array([t - S_A]))
+    X = chain_points(rp, mu)[0]
+    sd = chain_speeds(rp, mu, np.array([1.0]))[0]
+    return X, np.abs(sd)
+
+
+def D_rect(t):
+    X, _ = config_at(t)
+    d, pair, _ = min_bench_distance(X)
+    return d, pair
+
+
+def D_center(t):
+    X, _ = config_at(t)
+    d, pair = min_centerline_distance(X)
+    return d, pair
+
+
+# ---------- 扫描定位首个零点 ----------
+print("[扫描] D_rect(t), t = 300 ... 440, 步长 0.5 ...")
+ts_scan = np.arange(300.0, 440.0, 0.5)
+Ds = np.empty(len(ts_scan))
+t_first = None
+for i, t in enumerate(ts_scan):
+    d, _ = D_rect(t)
+    Ds[i] = d
+    if d <= 0 and t_first is None:
+        t_first = t
+print(f"[扫描] D(300)={Ds[0]:.4f}, D(400)={Ds[np.searchsorted(ts_scan,400)]:.4f}, "
+      f"首个 <=0 @ t={t_first}")
+assert Ds[0] > 0 and t_first is not None
+# 单调性核验（首零点前 D>0 且整体下降）
+idx0 = np.searchsorted(ts_scan, t_first)
+print(f"[扫描] [300,{t_first}] 内 D 最小值 = {Ds[:idx0].min():.6f} @ "
+      f"t={ts_scan[:idx0][np.argmin(Ds[:idx0])]:.1f}（应递减且全程>0）")
+
+# ---------- 二分求根 ----------
+lo, hi = t_first - 0.5, t_first          # D(lo)>0, D(hi)<=0
+dlo, _ = D_rect(lo)
+assert dlo > 0
+hist = [(lo + hi) / 2]
+for it in range(60):
+    mid = 0.5 * (lo + hi)
+    dm, _ = D_rect(mid)
+    if dm > 0:
+        lo = mid
+    else:
+        hi = mid
+    hist.append(0.5 * (lo + hi))
+    if hi - lo < 1e-12:
+        break
+t_star = 0.5 * (lo + hi)
+d_star, pair_star = D_rect(t_star)
+print(f"[求解] 终止时刻 t* = {t_star:.6f} s（二分 {len(hist)} 次，区间宽 {hi-lo:.2e}）")
+print(f"[求解] t* 时刻最小矩形间距 D = {d_star:.3e} m，首碰板凳对 = {pair_star}")
+
+BENCH_NAME = {0: "龙头"}
+for k in range(1, 222):
+    BENCH_NAME[k] = f"第{k}节龙身"
+BENCH_NAME[222] = "龙尾"
+i0, j0 = pair_star
+print(f"[求解] 首碰对：板凳{i0+1}（{BENCH_NAME[i0]}）与 板凳{j0+1}（{BENCH_NAME[j0]}）")
+
+# ---------- 容差敏感性（G8：相切容差口径） ----------
+for tol in (1e-6, 1e-3):
+    a, b_ = lo, t_first
+    for _ in range(60):
+        mid = 0.5 * (a + b_)
+        dm, _ = D_rect(mid)
+        if dm > tol:
+            a = mid
+        else:
+            b_ = mid
+    print(f"[敏感性] 判'相切'阈值={tol:g} m → t* = {0.5*(a+b_):.6f} s")
+
+# ---------- 对照判据：中心线距离 < 0.30 ----------
+lo_c, hi_c = 300.0, None
+for t in np.arange(380.0, 440.0, 0.5):
+    dc, _ = D_center(t)
+    if dc < 0.30:
+        hi_c = t
+        break
+assert hi_c is not None
+a, b_ = hi_c - 0.5, hi_c
+for _ in range(60):
+    mid = 0.5 * (a + b_)
+    dc, _ = D_center(mid)
+    if dc >= 0.30:
+        a = mid
+    else:
+        b_ = mid
+t_star_cl = 0.5 * (a + b_)
+print(f"[对照] 中心线判据终止时刻 = {t_star_cl:.6f} s（较主判据 "
+      f"{'提前' if t_star_cl < t_star else '推后'} {abs(t_star-t_star_cl):.3f} s）")
+
+# ---------- t* 时刻状态与 result2 ----------
+X_s, v_s = config_at(t_star)
+mu_s = walk_chain(rp, np.array([t_star - S_A]))
+res = chord_residual(rp, mu_s)
+print(f"[检验] t* 弦长残差 = {res:.2e}; 龙头位置 = ({X_s[0,0]:.6f}, {X_s[0,1]:.6f}), "
+      f"龙头速度 = {v_s[0]:.6f}")
+print(f"[检验] t* 龙头半径 = {np.linalg.norm(X_s[0]):.6f} m")
+
+wb = openpyxl.load_workbook(f"{ATT}/result2.xlsx")
+ws = wb["Sheet1"]
+import re as _re
+for r in range(2, ws.max_row + 1):
+    lab = ws.cell(row=r, column=1).value
+    if lab.startswith("龙头"):
+        k = 0
+    elif lab.startswith("龙尾（后）"):
+        k = 223
+    elif lab.startswith("龙尾"):
+        k = 222
+    else:
+        k = int(_re.match(r"^第(\d+)节龙身", lab).group(1))
+    ws.cell(row=r, column=2).value = round(float(X_s[k, 0]), 6) + 0.0
+    ws.cell(row=r, column=3).value = round(float(X_s[k, 1]), 6) + 0.0
+    ws.cell(row=r, column=4).value = round(float(v_s[k]), 6) + 0.0
+os.makedirs(f"{ROOT}/output", exist_ok=True)
+wb.save(f"{ROOT}/output/result2.xlsx")
+print("saved:", f"{ROOT}/output/result2.xlsx")
+
+paper_rows = [("龙头", 0), ("第1节龙身", 1), ("第51节龙身", 51), ("第101节龙身", 101),
+              ("第151节龙身", 151), ("第201节龙身", 201), ("龙尾（后）", 223)]
+print("\n== 问题2 表：t* 时刻位置与速度 ==")
+for name, k in paper_rows:
+    print(f"{name:>10} x={X_s[k,0]:>10.6f}  y={X_s[k,1]:>10.6f}  v={v_s[k]:>9.6f}")
+
+np.save(f"{ROOT}/output/q2_cache.npy",
+        np.array([t_star, t_star_cl]), allow_pickle=False)
+np.savez(f"{ROOT}/output/q2_scan.npz", ts=ts_scan, Ds=Ds)
+
+# ---------- 图 ----------
+fig, (axa, axb) = plt.subplots(1, 2, figsize=(11.5, 4.3))
+axa.plot(ts_scan, Ds, "-", color="#1f77b4", lw=1.3)
+axa.axvline(t_star, color="#d62728", ls="--", lw=1)
+axa.axhline(0, color="0.6", lw=0.7)
+axa.plot([t_star], [0], "o", color="#d62728", ms=5,
+         label=f"终止时刻 t*={t_star:.3f} s")
+axa.set_xlabel("t (s)"); axa.set_ylabel("全队最小板凳间距 D (m)")
+axa.set_title("盘入过程最小板凳间距（矩形判据）")
+axa.legend(fontsize=9)
+hist_a = np.array(hist)
+axb.semilogy(np.arange(1, len(hist_a) + 1), np.abs(hist_a - t_star) + 1e-17,
+             ".-", color="#2ca02c", lw=0.9)
+axb.set_xlabel("二分迭代次数"); axb.set_ylabel("|估计值 − t*| (s)")
+axb.set_title("终止时刻二分收敛")
+fig.tight_layout()
+save_fig(fig, "fig_q2_dt.png")
+
+# 终止位形 + 首碰对放大
+fig, (axa, axb) = plt.subplots(1, 2, figsize=(12.2, 6.2), width_ratios=[1, 1.15])
+axa.plot(X_s[:, 0], X_s[:, 1], "-", color="#1f77b4", lw=0.9)
+axa.plot(X_s[0, 0], X_s[0, 1], "o", color="#d62728", ms=5, label="龙头前把手")
+axa.plot(0, 0, "k+", ms=9)
+circ = plt.Circle((0, 0), 4.5, fill=False, color="0.6", ls=":", lw=1)
+axa.add_patch(circ)
+axa.set_aspect("equal")
+axa.set_xlabel("x (m)"); axa.set_ylabel("y (m)")
+axa.set_title(f"终止时刻 t*={t_star:.3f} s 全队位形")
+axa.legend(fontsize=9)
+# 放大：首碰两板凳矩形
+from dragon_core import bench_rects
+R = bench_rects(X_s)
+for k, c in zip((i0, j0), ("#d62728", "#2ca02c")):
+    poly = np.vstack([R[k], R[k, 0]])
+    axb.fill(poly[:, 0], poly[:, 1], color=c, alpha=0.25)
+    axb.plot(poly[:, 0], poly[:, 1], color=c, lw=1.4, label=f"板凳{k+1}（{BENCH_NAME[k]}）")
+    axb.plot(X_s[k:k + 2, 0], X_s[k:k + 2, 1], "k.-", lw=0.7, ms=4)
+allc = np.vstack([R[i0], R[j0]])
+cen = allc.mean(axis=0)
+span = max(1.2, np.abs(allc - cen).max() * 1.7)
+axb.set_xlim(cen[0] - span, cen[0] + span)
+axb.set_ylim(cen[1] - span, cen[1] + span)
+axb.set_aspect("equal")
+axb.set_xlabel("x (m)"); axb.set_ylabel("y (m)")
+axb.set_title(f"首碰对放大（间距 {d_star:.2e} m）")
+axb.legend(fontsize=9, loc="upper left")
+fig.tight_layout()
+save_fig(fig, "fig_q2_config.png")
+
+print(f"\n[运行时间] 问题2 总耗时 {time.time()-t_start:.1f} s")

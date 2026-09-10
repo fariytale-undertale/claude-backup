@@ -1,0 +1,144 @@
+%% pi_mc.m —— 用两种蒙特卡洛仿真思想计算 Pi
+% 思想一（随机投点 / 频率法）：
+%   在 [-1,1]x[-1,1] 正方形内均匀撒 n 个点，落入单位圆的频率 m/n
+%   收敛于概率 P(落在圆内) = pi/4，故 pi ≈ 4*m/n，误差 O(n^{-1/2})。
+% 思想二（蒲丰投针 / 几何概率法, Buffon 1777）：
+%   间距为 d 的平行线簇上随机投长为 l (l <= d) 的针，针与线相交的概率
+%   P = 2l/(pi*d)，故统计相交频率 m/n 后 pi ≈ 2*l*n/(d*m)。
+%   等价判定: 针中心到最近平行线的距离 y~U(0,d/2), 针与线夹角 th~U(0,pi/2),
+%   相交 <=> y <= (l/2)*sin(th)。
+% 随机数均由 rand 产生 (0,1) 均匀分布；运行结束打印结果并保存 4 张图。
+
+clear; clc; close all;
+rng(2026);                        % 固定种子便于复现；删除本行则每次结果不同
+
+%% ============ 方法一：随机投点法（频率思想）============
+n = 1e6;
+xy = 2*rand(n,2) - 1;             % 均匀撒入 [-1,1]^2
+inside = sum(xy(:,1).^2 + xy(:,2).^2 <= 1);   % 落入单位圆的点数 m
+pi_drop = 4*inside/n;
+
+%% ============ 方法二：蒲丰投针（几何概率思想）============
+l = 1; d = 1;                     % 针长 l 与线距 d, 取 l <= d 保证经典公式成立
+theta = pi/2 * rand(n,1);         % 针与平行线的夹角, U(0,pi/2)
+y = d/2 * rand(n,1);              % 针中心到最近平行线的距离, U(0,d/2)
+m_hit = sum(y <= (l/2)*sin(theta));           % 相交次数 m
+pi_buffon = 2*l*n/(d*m_hit);
+
+fprintf('================ 单次大样本估计 (n = %d) ================\n', n);
+fprintf('真值              pi = %.6f\n', pi);
+fprintf('投点法    4*m/n   = %.6f   绝对误差 %.2e\n', pi_drop, abs(pi_drop-pi));
+fprintf('蒲丰投针  2ln/(dm) = %.6f   绝对误差 %.2e (相交 %d 次)\n', ...
+        pi_buffon, abs(pi_buffon-pi), m_hit);
+
+%% ============ 图1：投点法示意图（对应课件插图）============
+figure('Color','w','Position',[80 80 980 430]);
+m0 = 500; xy0 = 2*rand(m0,2)-1;
+in0 = xy0(:,1).^2 + xy0(:,2).^2 <= 1;
+
+subplot(1,2,1);                   % 左：正方形内撒点
+plot(xy0(:,1), xy0(:,2), 'r.'); hold on;
+axis([-1 1 -1 1] * 1.15); axis square; grid on;
+xlabel('x'); ylabel('y');
+title(sprintf('正方形内均匀撒点  n = %d', m0));
+legend('随机点','Location','southeast');
+
+subplot(1,2,2);                   % 右：标出落入单位圆内的点
+th = linspace(0, 2*pi, 361);
+fill(cos(th), sin(th), [0.72 0.88 0.72], 'EdgeColor','k'); hold on;
+plot(xy0(in0,1), xy0(in0,2), 'b.', xy0(~in0,1), xy0(~in0,2), 'r.');
+axis([-1 1 -1 1] * 1.15); axis square; grid on;
+xlabel('x'); ylabel('y');
+title(sprintf('落入圆内 m = %d 个,  \\pi \\approx 4m/n = %.4f', sum(in0), 4*sum(in0)/m0));
+legend('单位圆','圆内','圆外','Location','southeast');
+exportgraphics(gcf, 'fig1_drop.png', 'Resolution', 200);
+
+%% ============ 图2：蒲丰投针示意图 ============
+figure('Color','w','Position',[100 100 620 520]);
+n0 = 60;
+x0 = 4*rand(n0,1);                % 针中心位置（示意用）
+y0 = 4*rand(n0,1);
+th0 = pi*rand(n0,1);              % 夹角 U(0,pi)，画全角度更直观
+dx = (l/2)*cos(th0); dy = (l/2)*sin(th0);
+klo = floor((y0-dy)/d); khi = floor((y0+dy)/d);
+hit0 = khi > klo;                 % 针两端跨过某条平行线 <=> 相交
+
+YL = 0:d:4;                       % 平行线 y = 0,d,2d,3d,4d
+hold on;
+for yy = YL
+    plot([0 4], [yy yy], 'k-', 'LineWidth', 1);
+end
+plot([x0(~hit0)-dx(~hit0), x0(~hit0)+dx(~hit0)]', ...
+     [y0(~hit0)-dy(~hit0), y0(~hit0)+dy(~hit0)]', 'b-', 'LineWidth', 1);
+plot([x0(hit0)-dx(hit0), x0(hit0)+dx(hit0)]', ...
+     [y0(hit0)-dy(hit0), y0(hit0)+dy(hit0)]', 'r-', 'LineWidth', 1);
+axis square; grid on; xlim([-0.2 4.2]); ylim([-0.6 4.6]);
+xlabel('x'); ylabel('y');
+title(sprintf('蒲丰投针示意: 投针 %d 根, 相交 %d 根 (红)', n0, sum(hit0)));
+legend('平行线(间距 d)','未相交','相交','Location','northeastoutside');
+exportgraphics(gcf, 'fig2_buffon.png', 'Resolution', 200);
+
+%% ============ 图3：误差收敛曲线（验证 O(n^{-1/2})）============
+ns = unique(round(logspace(1.5,6,20)));
+err1 = zeros(size(ns)); err2 = zeros(size(ns));
+for k = 1:numel(ns)
+    xyk = 2*rand(ns(k),2)-1;
+    err1(k) = abs(4*mean(sum(xyk.^2,2) <= 1) - pi);   % 投点法误差
+
+    mh = 0;
+    while mh == 0                 % 防止小样本下一次都未相交导致除零
+        thk = pi/2*rand(ns(k),1); yk = d/2*rand(ns(k),1);
+        mh = sum(yk <= (l/2)*sin(thk));
+    end
+    err2(k) = abs(2*l*ns(k)/(d*mh) - pi);             % 蒲丰投针误差
+end
+
+figure('Color','w','Position',[120 100 640 480]);
+loglog(ns, err1, 'o-', 'LineWidth',1.2); hold on;
+loglog(ns, err2, 's-', 'LineWidth',1.2);
+loglog(ns, 1.64./sqrt(ns), 'k--');    % 投点法理论标准差参考线
+loglog(ns, 2.37./sqrt(ns), 'k:');     % 蒲丰投针理论标准差参考线
+grid on;
+xlabel('样本数 n (对数轴)'); ylabel('|估计值 - \pi| (对数轴)');
+title('两种仿真思想的误差均按 O(n^{-1/2}) 收敛');
+legend('投点法','蒲丰投针','投点理论 1.64/\surd n','蒲丰理论 2.37/\surd n', ...
+       'Location','southwest');
+exportgraphics(gcf, 'fig3_converge.png', 'Resolution', 200);
+
+% 对数坐标下直线斜率应约为 -1/2
+p1 = polyfit(log(ns), log(err1), 1);
+p2 = polyfit(log(ns), log(err2), 1);
+fprintf('---------------- 收敛阶检验（log-log 斜率，理论 -0.5）----\n');
+fprintf('投点法斜率 = %.3f ,  蒲丰投针斜率 = %.3f\n', p1(1), p2(1));
+
+%% ============ 图4：重复实验分布（两种思想的方差对比）============
+nrep = 500; m = 1e4;
+pi1 = zeros(nrep,1); pi2 = zeros(nrep,1);
+for r = 1:nrep
+    xy = 2*rand(m,2)-1;
+    pi1(r) = 4*mean(sum(xy.^2,2) <= 1);
+    th = pi/2*rand(m,1); y = d/2*rand(m,1);
+    pi2(r) = 2*l*m/(d*sum(y <= (l/2)*sin(th)));
+end
+
+figure('Color','w','Position',[140 120 640 480]);
+histogram(pi1, 40, 'FaceAlpha',0.55); hold on;
+histogram(pi2, 40, 'FaceAlpha',0.55);
+xline(pi, 'k--', 'LineWidth', 1.5);
+grid on;
+xlabel('\pi 的估计值'); ylabel('频数');
+title(sprintf('%d 次重复实验 (每次 n = %d)：投点法散布更小', nrep, m));
+legend('投点法','蒲丰投针','真值 \pi');
+exportgraphics(gcf, 'fig4_hist.png', 'Resolution', 200);
+
+fprintf('---------------- 重复实验方差对比 ------------------------\n');
+fprintf('标准差: 投点法 %.5f | 蒲丰投针 %.5f | 比值 %.2f\n', ...
+        std(pi1), std(pi2), std(pi2)/std(pi1));
+
+% 蒲丰投针理论散布（delta 方法）: Var(pi_hat) ≈ (2l/(d p^2))^2 * p(1-p)/n, p = 2l/(pi d)
+p_hit = 2*l/(pi*d);
+sd_th = sqrt((2*l/(d*p_hit^2))^2 * p_hit*(1-p_hit));
+fprintf('(蒲丰每根针仅记录“相交/未相交”且需除以小概率 p=%.3f, 估计被放大, 方差约为投点法的 %.1f 倍)\n', ...
+        p_hit, (std(pi2)/std(pi1))^2);
+fprintf('蒲丰理论散布系数 %.3f/\surd n, 实测 %.3f/\surd n\n', ...
+        sd_th, std(pi2)*sqrt(m));

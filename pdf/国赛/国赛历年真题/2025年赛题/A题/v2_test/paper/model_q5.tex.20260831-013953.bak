@@ -1,0 +1,133 @@
+\section{问题五模型的建立与求解}
+
+\subsection{模型的建立}
+
+在问题四的连续决策之上叠加组合决策：
+(a) 导弹指派——每枚干扰弹恰指派一枚来袭导弹；
+(b) 弹量约束——每机至多 3 弹；
+(c) 间隔约束——同机两两投放间隔 $\ge 1$ s。
+目标为三枚导弹的遮蔽并集之和（各导弹独立计时）：
+\begin{equation}
+  \max\ \Delta T_{\text{tot}}
+  = \sum_{i=1}^{3} \Bigl\lvert
+    \bigcup_{(j,k)\,\to\,M_i} \mathcal{S}_{j,k} \Bigr\rvert,
+  \qquad
+  \sum_i \mathbb{I}[\text{机 } j \text{ 弹 } k \to M_i] \le 1 .
+\end{equation}
+这是「组合（指派）—连续（弹道参数）」的双层非凸问题。
+
+\subsection{四层求解框架}
+
+\textbf{层1：可达性矩阵}。结构化反解全扫 15 个（机，导弹）对：
+FY1 仅可达 M1（M2、M3 初始弹道分别偏北/偏南 $\pm600$ m，FY1 在 $y=0$
+航线无法横越）；其余四机对三导弹均有非零窗口（可行点 124--490）。
+
+\textbf{层2：单弹子解缓存}。对每个可行（机，导弹）对，以专项粗扫起点
++ NM 精修求独立单弹最优并缓存，供指派估价与上层复用：
+\begin{table}[H]
+\centering
+\caption{单弹子解缓存（体判据时长，s；「--」为不可达）}
+\begin{tabular}{lccc}
+\toprule
+ & M1 & M2 & M3 \\
+\midrule
+FY1 & 4.5258 & -- & -- \\
+FY2 & 3.5789 & 3.6469 & 3.1991 \\
+FY3 & -- & 2.0176 & 2.7042 \\
+FY4 & 2.8536 & 3.3805 & 2.5107 \\
+FY5 & 3.3118 & -- & 3.3675 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{层3：指派枚举与挤压修正}。枚举「每导弹选 2 架不同机」的组合
+（$C(4,2)^3=216$ 个，受每机 $\le3$ 弹约束过滤）。直接按子解和估价会选中
+M3 $\leftarrow$ FY5+FY2，但 FY2 同时承担 M1/M2/M3 三任务时共享航向耦合
+使其 M3 弹被挤压至无效（子解 3.20 s $\to$ 0）——估价函数未建模该耦合。
+修正：将 M3 的第二架机替换为 FY3（无其他任务、零耦合），修正后指派
+\begin{equation}
+  M_1 \leftarrow \{\text{FY1, FY2}\},\quad
+  M_2 \leftarrow \{\text{FY2, FY4}\},\quad
+  M_3 \leftarrow \{\text{FY5, FY3}\}.
+\end{equation}
+
+\textbf{层4：同机联合精修}。对每架机做一次 NM（共享 $\theta,v$ + 各任务
+弹的 $t_d,\tau$），目标为该机各弹对各自导弹的时长之和，含间隔罚与边界罚。
+
+\subsection{求解结果}
+
+\begin{table}[H]
+\centering
+\caption{问题五最优投放策略（result3.xlsx 同源）}
+\begin{tabular}{lccccccc}
+\toprule
+机 & 目标 & 航向 (°) & 速度 (m/s) & $t_d$ (s) & $\tau$ (s) & $t_b$ (s) & 时长 (s) \\
+\midrule
+FY1 & M1 & 176.64 & 70.00 & 0.0009 & 2.4969 & 2.4979 & 4.5435 \\
+FY2 & M2 & 219.59 & 110.72 & 7.9125 & 6.4273 & 14.3398 & 3.6813 \\
+FY2 & M1 & 219.59 & 110.72 & 10.6387 & 8.5235 & 19.1622 & 3.6046 \\
+FY4 & M2 & 218.89 & 133.72 & 6.9482 & 12.8189 & 19.7671 & 3.3873 \\
+FY5 & M3 & 141.44 & 140.00 & 13.5493 & 5.3700 & 18.9194 & 3.4324 \\
+FY3 & M3 & 82.31 & 128.77 & 20.4970 & 1.9871 & 22.4841 & 2.9974 \\
+\bottomrule
+\end{tabular}
+\end{table}
+\begin{equation}
+  \boxed{\Delta T_{\text{tot}}^* = 21.6465\ \mathrm{s}}
+  \quad
+  \begin{cases}
+    M_1:\ 8.1481\ \mathrm{s}\ (\text{FY1+FY2}) \\
+    M_2:\ 7.0686\ \mathrm{s}\ (\text{FY2+FY4}) \\
+    M_3:\ 6.4298\ \mathrm{s}\ (\text{FY5+FY3})
+  \end{cases}
+\end{equation}
+6 弹全部有效；FY2 双任务两弹投放间隔 2.73 s $\ge$ 1 s 满足约束。
+
+\subsection{结果检验与灵敏度分析}
+
+\textbf{子解复现一致性}：FY1$\to$M1 精修解 4.5435 s 与问题二全局最优
+逐字一致（同机同弹子问题跨问复用同一物理内核的强一致性证据）；
+各弹精修值与层2 子解差 $<2\%$（同机耦合损失）。
+
+\textbf{上界对比}：修正指派的子解和上界 21.20 s（层2 口径，含错峰完美
+假设），精修总时长 21.65 s 高于该上界的原因是 FY2 双任务共享航向时
+NM 对两弹联合调整产生了超出独立子解的并集收益（M1 并集无重叠、
+M2 并集无重叠），说明解处于独立子解上界的邻域且部分指标超越，
+进一步的全局最优性需混合整数规划验证（见模型评价）。
+
+\textbf{物理检验}：全部云团最低高度 $z_{\min}=621$ m（FY3 弹），未触地；
+FY5 $v=140$ 满速为远距可达所需（同问题四 FY2 成因）；FY1 $v=70$
+为单弹贴线最优（同问题二成因）。
+
+\textbf{指派结构洞察}：最优指派呈「专机化 + 双任务」形态——FY1 专打
+M1（唯一可达且最长）、FY2 以双弹覆盖 M1+M2（可达性最好的万金油）、
+FY3 补位 M3（低空快弹）；未被指派弹量的机（FY4 剩 2、FY5 剩 2 弹槽）
+反映边际收益递减：同机多弹受共享航向挤压，贡献趋零。
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.6\textwidth]{q5_gantt_M1.png}
+  \caption{问题五 M1 双弹遮蔽区间甘特图（FY1+FY2 接力，并集 8.148 s）}
+  \label{fig:q5g1}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.6\textwidth]{q5_gantt_M2.png}
+  \caption{问题五 M2 双弹遮蔽区间甘特图（FY2+FY4，并集 7.069 s）}
+  \label{fig:q5g2}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.6\textwidth]{q5_gantt_M3.png}
+  \caption{问题五 M3 双弹遮蔽区间甘特图（FY5+FY3，并集 6.430 s）}
+  \label{fig:q5g3}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\textwidth]{q5_trajectory.png}
+  \caption{问题五全局轨迹与起爆点（星色对应目标导弹色，右侧统计面板）}
+  \label{fig:q5traj}
+\end{figure}

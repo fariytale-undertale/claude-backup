@@ -1,0 +1,100 @@
+\section{问题三模型的建立与求解}
+
+\subsection{模型的建立}
+
+继承问题二模型，新增两项结构：(a) 三弹共享同一组（$\theta,v$）（同机约束）；
+(b) 两两投放间隔 $\ge 1$ s。决策向量为
+$\mathbf{x}=(\theta,v,t_{d,1},\tau_1,t_{d,2},\tau_2,t_{d,3},\tau_3)\in\mathbb{R}^8$，
+目标为三弹遮蔽区间的并集总长：
+\begin{equation}
+  \max_{\mathbf{x}}\ \Delta T_{\cup}(\mathbf{x})
+  = \Bigl\lvert \bigcup_{i=1}^{3} \mathcal{S}_i(\mathbf{x}) \Bigr\rvert,
+  \qquad
+  |t_{d,(i)} - t_{d,(i+1)}| \ge 1,
+\end{equation}
+其中 $\mathcal{S}_i$ 为第 $i$ 弹的体判据遮蔽区间，$(\cdot)$ 表示按投放
+时刻排序。
+
+\subsection{结构分析与求解器设计}
+
+\textbf{固定航向的窗口瓶颈}：固定问题二最优航向（$176.6°$）时，
+$(t_d,\tau)$ 平面非零遮蔽区仅覆盖 $t_d\in[0,\,1.75]$ s——容不下间隔
+1 s 的三弹（贪心逐弹法仅能选出两枚有效弹，第三弹为占位零弹，该方案被证伪）。
+
+\textbf{错峰结构}：给定 $(\theta,v,t_b)$ 时云心压线的 $(\tau,t_d)$ 由
+结构方程唯一确定（水平视线方程解出 $s$，压线高度反解 $\tau$）。以该
+「结构化反解」扫描 $(\theta,v)$ 网格，发现航向偏至 $\approx180°$ 且
+$v$ 提高后，$t_b$--时长曲线上出现三个可分离的峰，可承载三弹错峰接力遮蔽；
+扫描给出结构上界 7.127 s。
+
+\textbf{罚函数设计}：以结构峰为起点、8 维 Nelder--Mead 精修，约束以
+二次罚并入目标
+\begin{equation}
+  \min\ -\Bigl(\Delta T_{\cup}(\mathbf{x}) - P(\mathbf{x})\Bigr),
+\end{equation}
+罚项覆盖间隔违逆、速度越界、$\tau\le0$、$t_d<0$、起爆触地五类。
+（开发中曾将罚方向写反导致搜索发散至 $10^{37}$，已在明显不可行点上
+手验罚符号后修正——罚必须使最小化目标变大。）
+
+\subsection{求解结果}
+
+6 个起点（4 个结构峰 + 2 个组合起点）精修后，最优解为
+\begin{equation}
+  \theta^*=179.6125°,\quad v^*=139.9194\ \mathrm{m/s},
+\end{equation}
+三弹错峰起爆：
+\begin{table}[H]
+\centering
+\caption{问题三最优投放策略}
+\begin{tabular}{cccccc}
+\toprule
+弹序 & 投放时刻 $t_d$ (s) & 引信延迟 $\tau$ (s) & 起爆时刻 $t_b$ (s) &
+单独时长 (s) & 起爆点 $B$ (m) \\
+\midrule
+1 & 0.6791 & 4.2069 & 4.8860 & 3.3896 & $(17116.4,\ 4.6,\ 1713.3)$ \\
+2 & 2.0312 & 4.7687 & 6.7999 & 3.7641 & $(16848.6,\ 6.4,\ 1688.6)$ \\
+3 & 4.8061 & 5.7579 & 10.5640 & 1.7582 & $(16321.9,\ 10.0,\ 1637.6)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+\begin{equation}
+  \boxed{\Delta T_{\cup}^* = 7.0187\ \mathrm{s}}
+  \qquad(\text{逐弹和 } 8.9119\text{ s，重叠 } 1.8932\text{ s})
+\end{equation}
+
+\subsection{结果检验与灵敏度分析}
+
+\textbf{上界对比（近优性）}：结构化扫描上界 7.127 s 与解 7.0187 s 的间隙
+仅 1.5\%，多起点收敛一致，可判定解接近全局最优。
+
+\textbf{双路互证}：独立网格复算 7.0190 s，差 $2.7\times10^{-4}$ s。
+
+\textbf{边界成因}：$v=139.9$ 接近上界 140。物理成因：同机三弹共享航向时，
+载机越快弹的水平漂移越大，视线上的可用起爆窗口越宽，三弹错峰越容易排布；
+这与问题二「越慢越好」相反，说明单弹与多弹的最优速度方向受约束结构支配
+（单弹无间隔约束、航向自由，可用慢速贴线；三弹需以速度换窗口宽度）。
+
+\textbf{递进一致性}：$\Delta T_{Q1}=1.39 < \Delta T_{Q2}=4.54 <
+\Delta T_{Q3}=7.02$，弹数递增、遮蔽递增；三弹接力覆盖 M1 弹道前中段
+（图 \ref{fig:q3gantt}）。
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.95\textwidth]{q3_gantt.png}
+  \caption{问题三三弹遮蔽区间甘特图：三弹错峰接力，底部为并集}
+  \label{fig:q3gantt}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.92\textwidth]{q3_trajectory.png}
+  \caption{问题三场景：三弹投放—起爆 $xz$ 侧视图（上）与全局态势（下）}
+  \label{fig:q3traj}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.7\textwidth]{q3_convergence.png}
+  \caption{问题三联合 NM 多起点收敛曲线}
+  \label{fig:q3conv}
+\end{figure}

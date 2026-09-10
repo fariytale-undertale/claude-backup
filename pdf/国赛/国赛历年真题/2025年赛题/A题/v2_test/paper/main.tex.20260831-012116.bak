@@ -1,0 +1,97 @@
+\documentclass[12pt]{ctexart}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[table]{xcolor}
+\usepackage{multirow}
+\usepackage{caption}
+\usepackage[colorlinks=true, allcolors=black]{hyperref}
+\usepackage{geometry}
+\geometry{a4paper, left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm}
+
+% 国赛编号纪律：section 汉字、subsection/subsubsection 阿拉伯
+\renewcommand{\thesection}{\chinese{section}}
+\renewcommand{\thesubsection}{\arabic{section}.\arabic{subsection}}
+\renewcommand{\thesubsubsection}{\arabic{section}.\arabic{subsection}.\arabic{subsubsection}}
+\ctexset{section/name={,、}, section/format={\Large\bfseries}}
+
+\captionsetup{font=small}
+\graphicspath{{../output/figures/}}
+
+\begin{document}
+
+\begin{center}
+{\LARGE\bfseries 烟幕干扰弹的投放策略}\\[0.5em]
+{\large 摘\quad 要}\\
+\end{center}
+
+本文针对烟幕干扰弹对来袭导弹的多场景投放策略问题，建立了以「导弹—云团—视线—圆柱目标」
+运动学为核心、以视线遮挡为判据的确定性几何遮蔽模型，并将五问统一为一族递进的
+连续优化（辅以组合指派）问题求解。
+
+首先在统一的坐标系与运动学公理体系下，将真目标取为半径 7 m、高 10 m 的圆柱体，
+提出并并行实现两套遮蔽判据：\textbf{体判据}（圆柱表面 72 个采样点的视线全部被云团
+遮挡，正式口径）与\textbf{点判据}（柱心单点视线被遮，对比口径）。遮蔽区间端点由
+距离平方差函数 $f(t)$ 的分段二次结构经 Brent 求根精确确定，并以独立细网格扫描
+互证（差异 $<4\times10^{-4}$ s）。区分性测试表明：同一云团位置下两判据可给出不同
+判定（点判据系统性高估 3.1\%--3.7\%），故全文以体判据为准、点判据作稳健性对照。
+
+问题一：受领任务 1.5 s 投放、间隔 3.6 s 起爆的给定策略下，遮蔽区间为
+$[8.056,\,9.448]$ s，体判据有效遮蔽时长为 \textbf{1.3917 s}（点判据 1.4351 s）。
+
+问题二：以航向、速度、投放时刻、引信延迟为决策变量。全参数域形态诊断表明非零
+遮蔽区呈「针尖形」（随机采样命中率 0），故采用结构参数化热启动与降维搜索：由
+平抛与无人机等高度运动的几何恒等关系消元，先以 4 维 Nelder--Mead 搜索，再依
+边际剖面证明全局最优位于速度上/下边界组合，降维至 $(\theta,\tau)$ 二维精确求解，
+得最优策略航向 $176.64°$、速度 $70$ m/s、受领即投（$t_d=0$）、引信延迟
+$2.497$ s，\textbf{最大遮蔽时长 4.5435 s}，较问题一策略提升 226\%。
+
+问题三：单机三弹受同机共享航向与投放间隔 $\ge 1$ s 约束。结构分析发现固定
+问题二航向时非零窗口容不下三弹，必须偏航错峰；以结构化反解生成可行起点、
+8 维罚函数 Nelder--Mead 精修，并以上界扫描验证近优（间隙 1.5\%），得三弹
+错峰起爆（$t_b\approx4.9/6.8/10.6$ s），\textbf{并集遮蔽时长 7.0187 s}。
+
+问题四：三机各一弹。可达性分析给出三机视线可达窗口天然分离（FY1 早段、
+FY2 中段、FY3 晚段），独立最优之和即近似全局最优；联合精修得
+\textbf{并集 10.4286 s}，重叠为 0，验证了「天然错峰」的结构判断。
+
+问题五：5 机各至多 3 弹对三枚导弹。建立「可达性矩阵—单弹子解缓存—指派枚举
+—同机联合精修」四层求解框架；发现同机同目标双弹会被航向耦合挤压至无效，
+因而采用「每导弹两架不同机各一弹」的指派结构并作挤压修正，最终 6 弹全部
+有效：M1 获 8.1481 s、M2 获 7.0686 s、M3 获 6.4298 s，
+\textbf{总有效遮蔽 21.6465 s}。
+
+全文所有数字均由求解脚本直接输出并经双路互证（解析求根 vs 独立网格）；
+边界解均经边际剖面追查确认物理成因；同批交付 result1--3.xlsx 与全部图表代码。
+
+\vspace{1em}
+\noindent\textbf{关键词：} 遮蔽判据；几何光学；视线遮挡；非凸优化；Nelder--Mead；
+指派问题；上界探查
+
+\newpage
+\tableofcontents
+\newpage
+
+\input{model_common}
+\input{model_q1}
+\input{model_q2}
+\input{model_q3}
+\input{model_q4}
+\input{model_q5}
+\input{model_global}
+\input{model_eval}
+
+% 参考文献
+\begin{thebibliography}{9}
+\bibitem{wald} Wald A. Sequential Analysis[M]. New York: John Wiley \& Sons, 1947.
+\bibitem{nm} Nelder J A, Mead R. A simplex method for function minimization[J].
+  The Computer Journal, 1965, 7(4): 308--313.
+\bibitem{brent} Brent R P. Algorithms for Minimization without Derivatives[M].
+  Englewood Cliffs: Prentice-Hall, 1973.
+\bibitem{wolsey} Wolsey L A. Integer Programming[M]. 2nd ed. Hoboken: Wiley, 2020.
+\end{thebibliography}
+
+\appendix
+\input{appendix}
+
+\end{document}

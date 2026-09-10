@@ -1,0 +1,28 @@
+---
+name: latex-miktex-compile-pitfalls
+description: 本机 CTEX/MiKTeX 26.5 的 LaTeX 编译坑清单：PATH 坏条目必崩、booktabs/嵌套 tabular
+  失配、\input 表体首线、双日志核查、sed/heredoc 反斜杠陷阱
+metadata:
+  node_type: memory
+  type: project
+  originSessionId: sess_f99a33ad-1368-407b-97e7-732068328e8b
+---
+
+本机（CTEX 发行版：`D:\CTEX\MiKTeX`，MiKTeX 26.5 私有安装，xelatex + ctexart）实测踩坑与对策。2026-09-03 2023A 论文 12 轮编译修复沉淀。
+
+**Why**：全新编译（rm aux 后）与增量编译结果可能不同——附录表一行 `\\` 写成 `\` 的错误被旧 pass2.log 掩盖过一次；booktabs/嵌套 tabular 在本机最小样例即崩且重建格式无效，属发行版级失配，绕行是唯一解。
+
+**How to apply**（编译工作流与禁令）：
+1. ~~PATH 坏条目~~ **已修复（2026-09-03 用户从用户 PATH 删除）**。留诊断知识：若 xelatex/initexmf 报 "Windows API error 267 目录名称无效 / MiKTeX cannot retrieve attributes for the directory 'D:\...\xxx.exe'"，根因是 **PATH 里混入了文件路径而非目录**（本例某安装器把 `D:\stm32tool\cpkg.exe` 整条塞进用户 PATH），MiKTeX 把 PATH 条目当目录扫描时对文件补目录分隔符即崩。排查：`reg query "HKCU\Environment" /v Path`（注册表才是持久层；已开进程的环境是旧的，改完需新进程才生效）。若再现，临时规避：`export PATH="$(echo "$PATH" | tr ':' '\n' | grep -v '坏条目' | paste -sd:)"` 后编译。
+2. **必须查两遍日志、且以文件 mtime 确认新鲜**：`&&` 链在 pass1 失败后 pass2 不执行，旧 pass2.log 会给出假 0 错误（发生过两次）。每遍单独 `grep -c '^!'` 并核对时间戳。
+3. **booktabs 不可用**（最小样例 22 错误，`\@BTswitch` 未定义）；**嵌套 tabular 不可用**（内联/经 \input 均崩，`\endtemplate` 未定义）；`initexmf --dump` 重建格式无效且会因缺 optex.ini 失败。对策：全部表格用**单层 tabular + \hline** 三线样式；宽表转置（如年均表转 6×2 指标-数值表）；表头不用嵌套 tabular 折行，改短表头 + \footnotesize + \tabcolsep 收紧。
+4. **\input 的表体文件首行不能是 \hline**（Misplaced \noalign）——首条横线写在主体 `\begin{tabular}...\hline\input{body.tex}` 中，表体从表头行开始。
+5. **中文 LaTeX 补丁禁用 sed 与 shell heredoc**：msys sed 替换串 `\u` 被吞（\usepackage→\Sepackage）；heredoc 会削一层反斜杠（`\\Large`→`\Large` 致断言失败）。一律 Write 工具写 Python 补丁文件（io.open utf-8 + 精确 old/new + assert）后运行（T1 规则的强化版）。
+6. **附录节号**：`\appendix` 后直接 `\renewcommand\thesection{...}` 会被类覆盖（显示回 A/B/C），须用 `\ctexset{section/number = 附录\chinese{section}、}` 并同步 `\thesection` 供引用。渲染出"DAI 工具使用说明"这类连读即此症状。
+7. **节号空格**：`\ctexset{section/name={,、}}` 默认 aftername 会插入空白（"一、 问题重述"），加 `section/aftername={}` 得到连排"一、问题重述"。
+8. **摘要页格式**（用户确认的样例）：`\section*{论文题目}` → `\section*{摘要}` → 正文直排（无"摘 要："前缀）→ 关键词行；\section* 与章标题格式天然一致（勿用 center+\Large 手拼）。
+9. **表格超宽**：附录/月表用 `\footnotesize\setlength{\tabcolsep}{3-4pt}`；编译标准 = errors=0、Missing character=0、Overfull=0 三查（grep '^!' / 'Missing character' / 'Overfull'）。
+10. **verbatim 内禁中文与非 ASCII 数学符**（lmmono 缺字 → Missing character 轰炸）；书目 URL 用百分号编码（中文路径进 \url 同样缺字）。
+11. **numba njit 模块级全局编译期冻结**：需扫参的常数作为核参数传入，勿在运行期改全局。
+
+相关：[[lessons-cumcm-numerical-solver-pitfalls]]、[[cumcm-paper-format-preferences]]、[[project-2023a-heliostat-cumcm]]

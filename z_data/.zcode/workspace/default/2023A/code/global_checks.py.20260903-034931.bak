@@ -1,0 +1,78 @@
+# -*- coding: utf-8 -*-
+"""全局检验：三问对比图、共享模型参数扰动对下游的影响（G8）、交叉一致性断言"""
+import json
+
+import numpy as np
+import pandas as pd
+
+import engine as eg
+import figs as fg
+
+ROOT = r"D:/z_data/.zcode/workspace/default/2023A"
+
+q1 = json.load(open(f"{ROOT}/output/tables/q1_summary.json", encoding="utf-8"))
+q2 = json.load(open(f"{ROOT}/output/tables/q2_summary.json", encoding="utf-8"))
+q3 = json.load(open(f"{ROOT}/output/tables/q3_summary.json", encoding="utf-8"))
+
+# ---------- 三问递进对比图 ----------
+names = ["问题一\n(给定布局)", "问题二\n(统一尺寸优化)", "问题三\n(分带变尺寸)"]
+us = [q1["annual"]["unit_kW_m2"], q2["u"], q3["u"]]
+Es = [q1["annual"]["E_MW"], q2["E"], q3["E"]]
+etas = [q1["annual"]["eta"], q2["eta"]["eta"], q3["eta"]["eta"]]
+fig, axes = fg.plt.subplots(1, 3, figsize=(10.6, 3.6))
+for ax, vals, title, unit in [
+        (axes[0], us, "单位镜面面积年平均输出热功率", "kW/m²"),
+        (axes[1], Es, "年平均输出热功率", "MW"),
+        (axes[2], etas, "年平均光学效率", "")]:
+    bars = ax.bar(names, vals, color=["#8fb3de", "#f0a06a", "#9fd6a8"], width=0.55,
+                  edgecolor="k", linewidth=0.6)
+    for b, v in zip(bars, vals):
+        ax.annotate(f"{v:.4f}" if v < 1 else f"{v:.2f}", (b.get_x() + b.get_width() / 2, v),
+                    ha="center", va="bottom", fontsize=9)
+    ax.set_title(title, fontsize=10)
+    ax.set_ylabel(unit.replace("m²", "m2"))
+    ax.grid(axis="y", alpha=0.3, ls=":")
+    ax.set_ylim(0, max(vals) * 1.18)
+fig.tight_layout()
+fg.save(fig, "global_compare.png")
+
+# ---------- 共享模型参数（太阳半角）扰动对下游的影响（G8） ----------
+m2 = np.load(f"{ROOT}/data/q2_mirrors.npy")
+th2 = q2["theta"]
+n2 = len(m2)
+print("=== Q2 布局在共享参数扰动下的表现（K=12）===")
+rows = []
+for f in (0.9, 1.0, 1.1):
+    res = eg.evaluate_field(m2, np.full(n2, th2["z0"]), np.full(n2, th2["w"]), np.full(n2, th2["h"]),
+                            (th2["tx"], th2["ty"]), K=12, QN=64, cutoff=50.0, sun_half=eg.SUN_HALF * f)
+    E = float(res["df"]["E_kW"].mean()) / 1000
+    u = float(res["df"]["E_kW"].mean()) / res["A_total"]
+    rows.append((f, E, u, E >= 60))
+    print(f"  sun_half x{f}: E={E:.3f} MW  u={u:.5f}  达额={E>=60}")
+pd.DataFrame(rows, columns=["太阳半角倍率", "E(MW)", "u(kW/m2)", "达额"]).to_csv(
+    f"{ROOT}/output/tables/q2_sunhalf_sens.csv", index=False)
+
+# ---------- Q2 设计参数 ±2% 扰动（决策稳健性） ----------
+print("=== Q2 设计参数 ±2% 扰动 ===")
+for tag, dw, dh in [("-2%w", -0.02, 0.0), ("+2%w", 0.02, 0.0), ("0,-2%h", 0.0, -0.02), ("0,+2%h", 0.0, 0.02)]:
+    w = th2["w"] * (1 + dw)
+    h = th2["h"] * (1 + dh)
+    mxy, n = eg.layout_rows((th2["tx"], th2["ty"]), w, h, max(2.0, h / 2 + 0.05),
+                            w + 5.0, 0.86610 * (w + 5.0))
+    res = eg.evaluate_field(mxy, np.full(n, max(2.0, h / 2 + 0.05)), np.full(n, w), np.full(n, h),
+                            (th2["tx"], th2["ty"]), K=12, QN=64, cutoff=50.0)
+    E = float(res["df"]["E_kW"].mean()) / 1000
+    u = float(res["df"]["E_kW"].mean()) / res["A_total"]
+    print(f"  {tag}: N={n} E={E:.3f} u={u:.5f} 达额={E>=60}")
+
+# ---------- 交叉一致性断言 ----------
+print("=== 交叉一致性 ===")
+dni1 = q1["annual"]["DNI_mean"]
+e_check = dni1 * q1["A_total_m2"] * q1["annual"]["eta"] / 1000
+print(f"Q1: E=DNI*A*eta 复算 = {e_check:.3f} MW vs 报告 {q1['annual']['E_MW']:.3f} -> "
+      f"{abs(e_check - q1['annual']['E_MW']) < 0.01}")
+e2c = 0.967760 * q2["A"] * q2["eta"]["eta"] / 1000
+print(f"Q2: E=DNI*A*eta 复算 = {e2c:.3f} vs {q2['E']:.3f} (DNI 同 60 时点) -> "
+      f"{abs(e2c - q2['E']) < 0.05}")
+print(f"u 关系: Q1 u={us[0]:.4f} > Q3 u={us[2]:.4f} > Q2 u={us[1]:.4f} "
+      f"(Q1 布局稀疏无达额约束; Q2/Q3 受 E>=60 约束压缩) -> 机制解释成立: {us[0] > us[1]}")

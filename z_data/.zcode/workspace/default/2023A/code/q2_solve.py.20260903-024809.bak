@@ -1,0 +1,245 @@
+# -*- coding: utf-8 -*-
+"""问题二：环形布局族参数优化（v2，theta 10 维）
+theta = (tx, ty, w, h, z0, R0, gaz, gr, C, s)
+  C,s 为南界切除参数：仅保留 y >= -C + s*(R-100)；C=0 且 s=0 表示不切除（南全保留）。
+目标（字典序）：先满足 E_annual >= 60 MW，再最大化 u = E_annual/A_total。
+用法：python q2_solve.py coarse|southcut|refine|final
+"""
+import json
+import sys
+import time
+
+import numpy as np
+
+import engine as eg
+import figs as fg
+
+ROOT = r"D:/z_data/.zcode/workspace/default/2023A"
+STATE = f"{ROOT}/output/q2_state.json"
+RATED = 60.0
+
+
+def load():
+    with open(STATE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save(s):
+    with open(STATE, "w", encoding="utf-8") as f:
+        json.dump(s, f, ensure_ascii=False)
+
+
+def eval_theta(theta, K=12, want_detail=False, structure="rows"):
+    tx, ty, w, h, z0, R0, gaz, gr, C, s = theta
+    cut = None if (C <= 0 and s <= 0) else (C, s)
+    dmin = w + 5.0 + gaz
+    if structure == "rows":
+        mxy, n = eg.layout_rows((tx, ty), w, h, z0, dmin, 0.8660254 * dmin + gr, south_cut=cut)
+    else:
+        mxy, n = eg.layout_rings((tx, ty), w, h, z0, R0, 0.8660254 * dmin + gr, gaz, south_cut=cut)
+    if mxy is None or n < 10:
+        return None
+    res = eg.evaluate_field(mxy, np.full(n, z0), np.full(n, w), np.full(n, h), (tx, ty),
+                            K=K, QN=64, cutoff=50.0)
+    E = float(res["df"]["E_kW"].mean()) / 1000.0
+    A = res["A_total"]
+    u = float(res["df"]["E_kW"].mean()) / A
+    rec = dict(theta=[round(v, 4) for v in theta], n=int(n), A=round(A, 1),
+               E=round(E, 4), u=round(u, 6), feasible=bool(E >= RATED))
+    if want_detail:
+        rec["res"] = res
+        rec["mxy"] = mxy
+    return rec
+
+
+def lex_key(r):
+    """字典序：可行优先，其次 u"""
+    return (0 if r["feasible"] else 1, -r["u"] if r["feasible"] else -r["E"])
+
+
+def main(stage):
+    if stage == "coarse":
+        recs = []
+        t0 = time.time()
+        sizes = [(w, w) for w in (6.0, 6.5, 7.0, 7.5, 8.0)] + [(8.0, 7.0), (7.0, 6.0)]
+        for (w, h) in sizes:
+            z0 = max(2.0, h / 2 + 0.05)
+            for R0 in (101.5, 106.0, 112.0):
+                for gaz in (0.0, 1.0):
+                    for gr in (0.0, 0.5):
+                        th = [0.0, 0.0, w, h, z0, R0, gaz, gr, 0.0, 0.0]
+                        r = eval_theta(th)
+                        if r:
+                            recs.append(r)
+        recs.sort(key=lex_key)
+        save({"coarse": recs})
+        print(f"coarse done {len(recs)} layouts in {time.time()-t0:.0f}s")
+        for r in recs[:6]:
+            print(f"  u={r['u']:.4f} E={r['E']:6.2f} N={r['n']} feas={r['feasible']} {r['theta']}")
+        byE = sorted(recs, key=lambda r: -r["E"])[:5]
+        print("top-E:")
+        for r in byE:
+            print(f"  E={r['E']:6.2f} u={r['u']:.4f} N={r['n']} {r['theta']}")
+
+    elif stage == "southcut":
+        s = load()
+        pool0 = sorted(s["coarse"], key=lex_key)
+        seeds = {tuple(r["theta"]) for r in pool0[:3]}
+        recs = []
+        t0 = time.time()
+        for st in seeds:
+            tx, ty, w, h, z0, R0, gaz, gr, _, _ = st
+            for C in (0.0, 30.0, 60.0, 90.0, 120.0, 160.0, 200.0):
+                for sc in (0.0, 0.3):
+                    r = eval_theta([tx, ty, w, h, z0, R0, gaz, gr, C, sc])
+                    if r:
+                        recs.append(r)
+        s["southcut"] = recs
+        pool = sorted(s["coarse"] + recs, key=lex_key)
+        s["pool_top"] = pool[:15]
+        save(s)
+        print(f"southcut done {len(recs)} evals in {time.time()-t0:.0f}s")
+        for r in pool[:12]:
+            print(f"  u={r['u']:.4f} E={r['E']:6.2f} N={r['n']:5d} feas={r['feasible']} theta={r['theta']}")
+
+    elif stage == "refine":
+        s = load()
+        best = dict(s["pool_top"][0])
+        trace = [dict(i=0, u=best["u"], E=best["E"], theta=best["theta"], acc=True)]
+        ei = 0
+
+        def try_cand(c):
+            nonlocal ei, best
+            ei += 1
+            r = eval_theta(c)
+            acc = bool(r and lex_key(r) < lex_key(best))
+            if acc:
+                best = r
+            trace.append(dict(i=ei, u=r["u"] if r else None, E=r["E"] if r else None,
+                              theta=c, acc=acc))
+            return r
+
+        st0 = best["theta"][:]
+        # 阶段1：大步长逐维扫描（含 C、s）
+        for dim, deltas in [(9, (0.15, -0.15, 0.3)), (8, (30.0, -30.0, 60.0, -60.0)),
+                            (1, (-40.0, -80.0, 40.0)), (5, (-6.0, -3.0, 3.0)),
+                            (6, (0.75, -0.75)), (7, (0.75, -0.75)),
+                            (2, (0.5, -0.5, 1.0)), (3, (0.5, -0.5)), (4, (0.5, -0.5)),
+                            (0, (-20.0, 20.0))]:
+            for d in deltas:
+                c = best["theta"][:]
+                c[dim] = c[dim] + d
+                if dim == 8:
+                    c[8] = max(0.0, c[8])
+                if dim == 9:
+                    c[9] = max(0.0, min(0.75, c[9]))
+                if dim == 7:
+                    c[7] = max(0.0, c[7])
+                if dim == 6:
+                    c[6] = max(0.0, c[6])
+                if dim == 5:
+                    c[5] = min(130.0, max(101.0, c[5]))
+                if dim == 4:
+                    c[4] = min(6.0, max(max(2.0, c[3] / 2), c[4]))
+                if dim == 3:
+                    c[3] = min(c[2], max(2.0, c[3]))
+                if dim == 2:
+                    c[2] = min(8.0, max(3.0, c[2]))
+                if dim == 1:
+                    c[1] = max(-220.0, min(0.0, c[1]))
+                try_cand(c)
+        # 阶段2：小步长两轮
+        for phase, dsmall in enumerate([(15.0, 0.075, 1.5, 0.4), (7.0, 0.04, 0.75, 0.2)]):
+            dC, ds, dg, dz = dsmall
+            for dim, deltas in [(8, (dC, -dC)), (9, (ds, -ds)), (6, (dg, -dg)), (7, (dg, -dg)),
+                                (5, (dg, -dg)), (1, (dC, -dC)), (4, (dz, -dz)),
+                                (2, (0.25, -0.25)), (3, (0.25, -0.25))]:
+                for d in deltas:
+                    c = best["theta"][:]
+                    c[dim] = c[dim] + d
+                    c[8] = max(0.0, c[8]); c[9] = max(0.0, min(0.75, c[9]))
+                    c[6] = max(0.0, c[6]); c[7] = max(0.0, c[7])
+                    c[5] = min(130.0, max(101.0, c[5]))
+                    c[4] = min(6.0, max(max(2.0, c[3] / 2), c[4]))
+                    c[3] = min(c[2], max(2.0, c[3])); c[2] = min(8.0, max(3.0, c[2]))
+                    c[1] = max(-220.0, min(0.0, c[1]))
+                    try_cand(c)
+        s["refine_best"] = {k: v for k, v in best.items() if k not in ("res", "mxy")}
+        s["trace"] = trace
+        save(s)
+        print(f"refine done, {ei} evals, best u={best['u']:.5f} E={best['E']:.3f} "
+              f"N={best['n']} feas={best['feasible']}")
+        print(f"  theta={best['theta']}")
+
+    elif stage == "final":
+        s = load()
+        best = s["refine_best"]
+        th = best["theta"]
+        r24 = eval_theta(th, K=24, want_detail=True)
+        print(f"K=24 confirm: u={r24['u']:.5f} E={r24['E']:.3f} N={r24['n']} A={r24['A']:.0f}")
+        tries = 0
+        while (not r24["feasible"] or r24["E"] < RATED + 0.15) and tries < 8:
+            th = th[:]
+            th[6] = max(0.0, th[6] - 0.25)
+            th[7] = max(0.0, th[7] - 0.25)
+            th[8] = max(0.0, th[8] - 10.0)
+            tries += 1
+            r24 = eval_theta(th, K=24, want_detail=True)
+            print(f"  densify x{tries}: gaz/gr/C -> {th[6]:.2f}/{th[7]:.2f}/{th[8]:.0f}: "
+                  f"E={r24['E']:.3f} u={r24['u']:.5f}")
+        s["final"] = dict(theta=th, u=r24["u"], E=r24["E"], n=r24["n"], A=r24["A"],
+                          feas=r24["feasible"])
+        save(s)
+        res = r24["res"]; mxy = r24["mxy"]; df = res["df"]; A = r24["A"]
+        eta_m = res["eta_mirror_TN"].mean(axis=0)
+        print(f"FINAL Q2: tower=({th[0]:.1f},{th[1]:.1f}) size={th[2]}x{th[3]} z0={th[4]} "
+              f"R0={th[5]:.1f} gaz={th[6]:.2f} gr={th[7]:.2f} C={th[8]:.1f} s={th[9]:.3f}")
+        print(f"  N={r24['n']} A={A:.0f} m2  E={r24['E']:.3f} MW  u={r24['u']:.5f} kW/m2")
+        print(f"  eta={df['eta'].mean():.5f} cos={df['eta_cos'].mean():.5f} "
+              f"sb={df['eta_sb'].mean():.5f} tr={df['eta_tr'].mean():.5f}")
+        print(f"  per-mirror eta: min={eta_m.min():.4f} p10={np.percentile(eta_m,10):.4f} "
+              f"mean={eta_m.mean():.4f}")
+        from scipy.spatial import cKDTree
+        dnn, _ = cKDTree(mxy).query(mxy, k=2)
+        print(f"  min NN spacing={dnn[:,1].min():.3f} (need >= {th[2]+5:.1f}) "
+              f"r_max={np.hypot(mxy[:,0],mxy[:,1]).max():.2f} "
+              f"d_tower_min={np.hypot(mxy[:,0]-th[0],mxy[:,1]-th[1]).min():.2f}")
+        mon = df.groupby("month_idx", as_index=False).agg(
+            eta_cos=("eta_cos", "mean"), eta_sb=("eta_sb", "mean"),
+            eta_tr=("eta_tr", "mean"), eta=("eta", "mean"), E_kW=("E_kW", "mean"))
+        mon["unit"] = mon["E_kW"] / A
+        fg.plot_layout(mxy, eta_m, (th[0], th[1]), "q2_layout_eta.png",
+                       "问题二优化布局及逐镜年平均光学效率", sizes=13)
+        fg.plot_components(mon, "q2_components_month.png", "问题二 逐月平均效率分量")
+        fg.plot_power(df, "q2_power_time.png", "问题二 定日镜场输出热功率")
+        sunv, _, _, _ = eg.build_times()
+        i0 = int(np.argmin(np.abs(np.hypot(mxy[:, 0] - th[0] - 150, mxy[:, 1] - th[1] + 100))))
+        fg.scene_3d(mxy, np.full(r24["n"], th[4]), (th[0], th[1]), sunv[2 * 5 + 1],
+                    "scene_3d_q2.png", sample_idx=i0, label="（问题二）")
+        np.save(f"{ROOT}/data/q2_mirrors.npy", mxy)
+        mon.to_csv(f"{ROOT}/output/tables/q2_monthly.csv", index=False)
+        tr = s.get("trace", [])
+        if tr:
+            import matplotlib.pyplot as plt
+            xs = [t["i"] for t in tr]
+            acc = [t for t in tr if t.get("acc")]
+            fig, ax = plt.subplots(figsize=(7.0, 3.8))
+            ax.plot(xs, [t["u"] if t["u"] else np.nan for t in tr], ".", ms=2.5,
+                    color="lightsteelblue", label="全部评估点")
+            ax.plot([t["i"] for t in acc], [t["u"] for t in acc], "o", ms=4,
+                    color="crimson", label="当前最优更新")
+            ax2 = ax.twinx()
+            ax2.plot(xs, [t["E"] if t["E"] is not None else np.nan for t in tr], ",",
+                     color="lightgray")
+            ax2.set_ylabel("输出热功率 E/MW", color="gray")
+            ax2.axhline(60, color="green", ls="--", lw=0.8)
+            ax2.annotate("额定 60 MW", xy=(0.02, 60), xycoords=("axes fraction", "data"),
+                         fontsize=8, color="green", va="bottom")
+            ax.set_xlabel("累计评估次数"); ax.set_ylabel("单位面积年平均输出热功率 (kW/m²)")
+            ax.set_title("问题二 参数精化收敛轨迹（字典序：E≥60 MW 后最大化 u）")
+            ax.grid(alpha=0.3, ls=":"); ax.legend(loc="lower right")
+            fg.save(fig, "q2_convergence.png")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1] if len(sys.argv) > 1 else "coarse")

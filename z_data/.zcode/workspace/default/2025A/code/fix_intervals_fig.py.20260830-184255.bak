@@ -1,0 +1,92 @@
+# -*- coding: utf-8 -*-
+"""重绘 q3/q4 遮蔽区间图（修复行标签与条带错位：改为自上而下 弹1→弹3 / FY1→FY3）。"""
+import numpy as np
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import openpyxl
+from common import UAVS, target_samples, shading_intervals, union_length
+import plotstyle as ps
+ps.set_figdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'output', 'figures'))
+import matplotlib.pyplot as plt
+
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SAMPLES_V = target_samples(48, 4)
+
+def read_rows(path, col_u, col_pd, col_b, col_mis, default_u='FY1'):
+    wb = openpyxl.load_workbook(path)
+    ws = wb.active
+    rows = []
+    for r in range(2, ws.max_row + 1):
+        u = ws.cell(row=r, column=col_u).value if col_u else default_u
+        hd = ws.cell(row=r, column=col_hd).value
+        if not isinstance(hd, (int, float)) or u is None or not str(u).startswith('FY'):
+            continue
+        sp = float(ws.cell(row=r, column=col_sp).value)
+        Pd = np.array([float(ws.cell(row=r, column=c).value) for c in col_pd])
+        B = np.array([float(ws.cell(row=r, column=c).value) for c in col_b])
+        u0 = UAVS[str(u)]
+        td = np.linalg.norm(Pd[:2] - u0[:2]) / sp
+        tf = np.sqrt(max((u0[2] - B[2]) / (0.5 * 9.8), 1e-9))
+        mis = ws.cell(row=r, column=col_mis).value if col_mis else 'M1'
+        rows.append([str(u), float(hd), sp, td, tf, mis])
+    return rows
+
+def intervals(rows):
+    out = []
+    for (u, hd, sp, td, tf, mis) in rows:
+        iv, _, _ = shading_intervals(UAVS[u], hd, sp, td, tf, mis, dt=0.02,
+                                     samples=SAMPLES_V, criterion='body')
+        out.append(iv)
+    return out
+
+# ---- 问题三：三弹（同机），自上而下 弹1/弹2/弹3，底部并集 ----
+rows3 = read_rows(os.path.join(BASE, 'results', 'result1.xlsx'), None, 1, 2, (4, 5, 6), (7, 8, 9), None)
+ivs3 = intervals(rows3)
+alliv3 = [seg for iv in ivs3 for seg in iv]
+tau3 = union_length(alliv3)
+fig, ax = plt.subplots(figsize=(9, 3.4))
+cols3 = ['crimson', 'darkorange', 'purple']
+for k, iv in enumerate(ivs3):
+    for a, b in iv:
+        ax.barh(2 - k, b - a, left=a, height=0.4, color=cols3[k], alpha=0.85)
+uni = []
+for a, b in sorted(alliv3):
+    if uni and a <= uni[-1][1]:
+        uni[-1][1] = max(uni[-1][1], b)
+    else:
+        uni.append([a, b])
+for a, b in uni:
+    ax.barh(-0.7, b - a, left=a, height=0.35, color='steelblue')
+    ax.text((a + b) / 2, -0.7, f'{b - a:.2f}', ha='center', va='center', color='w', fontsize=9)
+ax.set_yticks([-0.7, 0, 1, 2])
+ax.set_yticklabels([f'并集 τ={tau3:.2f}s', '弹3', '弹2', '弹1'])   # y=2 为弹1（自上而下弹1→弹3）
+ax.set_xlabel('时间 t / s')
+ax.set_title('问题3：各弹遮蔽区间与并集（自上而下弹1→弹3）')
+ps.save(fig, 'q3_interval.png')
+
+# ---- 问题四：三机各一弹，自上而下 FY1/FY2/FY3，底部并集 ----
+rows4 = read_rows(os.path.join(BASE, 'results', 'result2.xlsx'), 1, 2, 3, (4, 5, 6), (7, 8, 9), None)
+ivs4 = intervals(rows4)
+alliv4 = [seg for iv in ivs4 for seg in iv]
+tau4 = union_length(alliv4)
+names4 = [r[0] for r in rows4]
+fig, ax = plt.subplots(figsize=(9, 3.6))
+cols4 = ['green', 'darkgreen', 'lime']
+for k, iv in enumerate(ivs4):
+    for a, b in iv:
+        ax.barh(2 - k, b - a, left=a, height=0.4, color=cols4[k], alpha=0.85)
+uni4 = []
+for a, b in sorted(alliv4):
+    if uni4 and a <= uni4[-1][1]:
+        uni4[-1][1] = max(uni4[-1][1], b)
+    else:
+        uni4.append([a, b])
+for a, b in uni4:
+    ax.barh(-0.8, b - a, left=a, height=0.35, color='steelblue')
+    ax.text((a + b) / 2, -0.8, f'{b - a:.2f}', ha='center', va='center', color='w', fontsize=9)
+ax.set_yticks([-0.8, 0, 1, 2])
+ax.set_yticklabels([f'并集 τ={tau4:.2f}s', names4[2], names4[1], names4[0]])  # y=2 为 FY1
+ax.set_xlabel('时间 t / s')
+ax.set_title('问题4：各机遮蔽区间与并集（自上而下 FY1→FY3）')
+ps.save(fig, 'q4_interval.png')
+print('q3/q4 区间图已按正确行序重绘')

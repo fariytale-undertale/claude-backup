@@ -1,0 +1,142 @@
+# -*- coding: utf-8 -*-
+"""引擎区分性测试套件（G1 后置区分性测试 + 数值正确性 G4）
+运行：python tests_engine.py  全部断言通过打印 ALL TESTS PASSED
+"""
+import numpy as np
+import engine as eg
+
+FAIL = []
+
+
+def check(name, cond, info=""):
+    tag = "PASS" if cond else "FAIL"
+    print(f"[{tag}] {name} {info}")
+    if not cond:
+        FAIL.append(name)
+
+
+# ---------- T1 太阳位置解析核对 ----------
+s_eq, a_eq = eg.sun_vec(0.0, 12.0)     # 春分正午
+s_su, a_su = eg.sun_vec(92.0, 12.0)    # 夏至正午
+s_wi, a_wi = eg.sun_vec(275.0, 12.0)   # 冬至正午
+check("T1 春分正午高度角=50.6", abs(np.degrees(a_eq) - 50.6) < 0.05, f"={np.degrees(a_eq):.3f}")
+check("T1 夏至正午高度角=74.05", abs(np.degrees(a_su) - (90 - 39.4 + 23.45)) < 0.05, f"={np.degrees(a_su):.3f}")
+check("T1 冬至正午高度角=27.15", abs(np.degrees(a_wi) - (90 - 39.4 - 23.45)) < 0.05, f"={np.degrees(a_wi):.3f}")
+check("T1 正午方位角=正南(180)", abs(np.degrees(np.arctan2(s_eq[0], s_eq[1])) + 180) < 0.1)
+s_m, a_m = eg.sun_vec(0.0, 9.0)
+check("T1 上午太阳在东侧(sx>0)", s_m[0] > 0, f"sx={s_m[0]:.3f}")
+check("T1 DNI 连续可算", 0.6 < eg.dni(a_wi) < 1.1, f"DNI(冬至正午)={eg.dni(a_wi):.4f}")
+
+# ---------- T2 孤立单镜：eta_sb=1 ----------
+mxy = np.array([[0.0, 0.0]])
+out = eg.evaluate_field(mxy, [4.0], [6.0], [6.0], (0.0, 0.0))
+check("T2 孤立单镜 eta_sb=1", np.allclose(out['df']['eta_sb'], 1.0), f"min={out['df']['eta_sb'].min():.6f}")
+
+# ---------- T3 阴影几何区分性测试（手算构造） ----------
+# 正午(春分)高度角 50.6°；高置遮挡体(z=10)的影子沿正北位移 (10-4)/tan(50.6°)=4.948 m
+# j 放在 i 南侧 4.948 m → 影子恰好罩住 i → 显著遮挡；j 放在 20 m → 影子落在 -15.05 m → 不遮挡
+base = np.array([[0.0, 0.0]])
+disp = 6.0 / np.tan(a_eq)
+for tag, jy, expect_shaded in [("影子落点上", -disp, True), ("影子落点外", -20.0, False)]:
+    mxy2 = np.vstack([base, [[0.0, jy]]])
+    out2 = eg.evaluate_field(mxy2, [4.0, 10.0], [6.0, 6.0], [6.0, 6.0], (0.0, 500.0))
+    sb_noon = out2['df']['eta_sb'].iloc[2]  # 12:00
+    ok = (sb_noon < 0.97) if expect_shaded else (sb_noon > 0.9999)
+    check(f"T3 阴影-{tag}", ok, f"sb_noon={sb_noon:.4f} (位移={disp:.3f}m)")
+
+# 阻挡：遮挡体中心严格落在镜0中心→集热器中心连线上 → 阻挡；横向偏开 20m → 不阻挡
+tow = (500.0, 0.0)
+r_dir = np.array([tow[0], tow[1], 80.0 - 4.0]); r_dir /= np.linalg.norm(r_dir)
+z_on = 4.0 + 7.2 * r_dir[2]
+on_line = np.array([[7.2 * r_dir[0], 7.2 * r_dir[1]]])
+off_line = np.array([[7.2 * r_dir[0], 7.2 * r_dir[1] + 20.0]])
+for tag, pos, zj, expect_blk in [("连线上", on_line, z_on, True), ("横偏20m", off_line, 4.0, False)]:
+    mxy3 = np.vstack([base, pos])
+    out3 = eg.evaluate_field(mxy3, [4.0, zj], [6.0, 6.0], [6.0, 6.0], tow)
+    sb_noon = out3['df']['eta_sb'].iloc[2]  # 12:00
+    ok = (sb_noon < 0.98) if expect_blk else (sb_noon > 0.999)
+    check(f"T4 阻挡-{tag}", ok, f"sb_noon={sb_noon:.4f}")
+
+# ---------- T5 截断距离效应（区分性：模糊半径 sigma=L*theta 随距离增大） ----------
+# 近塔 L≈126m, sigma≈0.59m：投影轮廓完全落在接收器轮廓内且余量>sigma → eta_trunc≈1
+out5a = eg.evaluate_field(base, [4.0], [6.0], [6.0], (0.0, 100.0))
+tr_near = out5a['df']['eta_tr'].mean()
+# 远距 L≈605m, sigma≈2.81m：模糊显著溢出 → 截断明显 <1
+out5b = eg.evaluate_field(base, [4.0], [6.0], [6.0], (0.0, 600.0))
+tr_far = out5b['df']['eta_tr'].mean()
+check("T5 近塔单镜 eta_trunc≈1", tr_near > 0.98, f"={tr_near:.4f}")
+check("T5 截断随距离显著下降", tr_far < tr_near - 0.10, f"far={tr_far:.4f}")
+
+# ---------- T6 投影面积恒等式 Σ A_sub_proj = A·(n·r) ----------
+sv, _ = eg.sun_vec(120.0, 10.5)
+C = np.array([0.0, 0.0, 80.0]); M = np.array([150.0, 120.0, 4.0])
+r = C - M; r /= np.linalg.norm(r)
+n = (sv + r); n /= np.linalg.norm(n)
+wl = np.hypot(n[0], n[1]); wv = np.array([-n[1] / wl, n[0] / wl, 0.0]); hv = np.cross(n, wv)
+eh = np.cross(np.array([0.0, 0.0, 1.0]), r); eh /= np.linalg.norm(eh)
+evv = np.cross(eh, r)
+if evv[2] < 0:
+    evv = -evv
+w_, h_, K = 6.0, 6.0, 12
+tot = 0.0
+for a in range(K):
+    for b in range(K):
+        e1 = (w_ / K) * wv; e2 = (h_ / K) * hv
+        p1 = np.array([e1 @ eh, e1 @ evv]); p2 = np.array([e2 @ eh, e2 @ evv])
+        tot += abs(p1[0] * p2[1] - p1[1] * p2[0])
+ident = tot - (w_ * h_ * (n @ r))
+check("T6 ΣA_sub_proj = A·(n·r)", abs(ident) < 1e-9, f"diff={ident:.2e}")
+
+# ---------- T7 截断 vs 精确圆柱 Monte Carlo ----------
+def mc_trunc(M, n, sv, C, nsamp=60000, seed=3):
+    rng = np.random.default_rng(seed)
+    w_, h_ = 6.0, 6.0
+    wl = np.hypot(n[0], n[1]); wv = np.array([-n[1]/wl, n[0]/wl, 0.0]); hv = np.cross(n, wv)
+    u = (rng.random(nsamp) - .5) * w_; v = (rng.random(nsamp) - .5) * h_
+    P = M + u[:, None] * wv + v[:, None] * hv
+    # 太阳圆盘方向偏移（⊥s 平面均匀）
+    e1 = np.cross(sv, np.array([0.0, 0.0, 1.0])); e1 /= np.linalg.norm(e1); e2 = np.cross(e1, sv)
+    rr = eg.SUN_HALF * np.sqrt(rng.random(nsamp)); th = 2 * np.pi * rng.random(nsamp)
+    din = -(sv[None, :] + rr[:, None] * (np.cos(th)[:, None] * e1 + np.sin(th)[:, None] * e2))
+    din /= np.linalg.norm(din, axis=1)[:, None]
+    dr = din - 2 * np.einsum('ij,j->i', din, n)[:, None] * n[None, :]
+    # 光线-圆柱求交（轴向 z，圆心 (C0,C1)，半径3.5，z∈[76,84]）
+    px, py, pz = P[:, 0] - C[0], P[:, 1] - C[1], P[:, 2] - C[2]
+    dx, dy, dz = dr[:, 0], dr[:, 1], dr[:, 2]
+    A = dx**2 + dy**2; B = 2 * (px * dx + py * dy); Cq = px**2 + py**2 - eg.REC_R**2
+    disc = B**2 - 4 * A * Cq
+    hit = np.zeros(nsamp, bool)
+    ok = disc > 0
+    t1 = (-B[ok] - np.sqrt(disc[ok])) / (2 * A[ok])
+    t2 = (-B[ok] + np.sqrt(disc[ok])) / (2 * A[ok])
+    z1 = pz[ok] + t1 * dz[ok]; z2 = pz[ok] + t2 * dz[ok]
+    hit_side = (t1 > 0) & (z1 >= C[2] - eg.REC_HH) & (z1 <= C[2] + eg.REC_HH)
+    # 顶/底盖
+    with np.errstate(divide='ignore', invalid='ignore'):
+        tc = np.where(np.abs(dz) > 1e-12, (C[2] + eg.REC_HH - pz) / dz, -1.0)
+        tc2 = np.where(np.abs(dz) > 1e-12, (C[2] - eg.REC_HH - pz) / dz, -1.0)
+    cap = lambda t: (t > 0) & ((px + t * dx)**2 + (py + t * dy)**2 <= eg.REC_R**2)
+    hit_cap = cap(tc) | cap(tc2)
+    hit[ok] = hit_side | hit_cap[ok]
+    return hit.mean()
+
+cases = [((0.0, 0.0), 4.0), (150.0, 120.0)]
+towerC = np.array([0.0, 0.0, 80.0])
+for cpos in [np.array([0.0, 0.0, 4.0]), np.array([150.0, 120.0, 4.0]), np.array([-280.0, 60.0, 4.0])]:
+    sv, _ = eg.sun_vec(92.0, 10.5)
+    r = towerC - cpos; Li = np.linalg.norm(r); r = r / Li
+    n = sv + r; n = n / np.linalg.norm(n)
+    f_mc = mc_trunc(cpos, n, sv, towerC)
+    # 引擎同配置：单镜 + 远处第二个不可交互镜不需要；直接单镜评估取 eta_tr
+    outX = eg.evaluate_field(cpos[None, :2], [cpos[2]], [6.0], [6.0], (0.0, 0.0))
+    # 用与 MC 同一时点（夏至10:30 => 行 index: 月6 => idx5*5 + 1）
+    tr_eng = outX['df']['eta_tr'].iloc[5 * 5 + 1]
+    mc_se = np.sqrt(f_mc * (1 - f_mc) / 60000)
+    check(f"T7 截断 MC 一致 @{cpos[:2]}", abs(tr_eng - f_mc) < max(4 * mc_se, 0.006),
+          f"engine={tr_eng:.4f} mc={f_mc:.4f} (3σ={3*mc_se:.4f})")
+
+print("=" * 40)
+if FAIL:
+    print("FAILED:", FAIL)
+    raise SystemExit(1)
+print("ALL TESTS PASSED")

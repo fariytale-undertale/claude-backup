@@ -1,0 +1,491 @@
+# -*- coding: utf-8 -*-
+"""
+2024A 板凳龙 核心库
+口径（已确认，见 solving_records/00_判据与参数记录.md）：
+- 手性：标准右手系，A=(8.8,0)，顺时针盘入 = theta 递减
+- 链约束：相邻把手中心欧氏弦长（龙头 2.86 m，其余 1.65 m），224 把手 / 223 段
+- 碰撞主判据：板凳矩形（孔连线两端各延伸 0.275 m、横向 ±0.15 m）间欧氏距离 = 0 即相切
+- 对照判据：扩展中心线段间距离 >= 0.30 m 为无碰撞
+- 相邻板凳对（|i-j|<2）铰接排除
+约定：路径弧参数 mu 沿"行进方向"递增；链条从头部向 mu 减小方向逐节排布。
+"""
+import numpy as np
+import math
+
+TWO_PI = 2.0 * np.pi
+N_HANDLE = 224          # 把手数
+N_BENCH = 223           # 板凳数
+EXT = 0.275             # 孔心距最近板头 (m)
+HALF_W = 0.15           # 半板宽 (m)
+BOARD_W = 0.30          # 板宽（对照判据用）
+CHORDS = np.concatenate([[3.41 - 2 * EXT], np.full(N_BENCH - 1, 2.20 - 2 * EXT)])
+
+
+# ---------------- 螺线弧长 ----------------
+def theta_of_s_scalar(s, b, th_max=1e4):
+    """theta_of_s 的纯标量版（math 模块，无 numpy 开销），与向量化版同一牛顿迭代。"""
+    th = math.sqrt(max(2.0 * s / b, 1e-16))
+    for _ in range(40):
+        f = 0.5 * b * (th * math.sqrt(1.0 + th * th) + math.asinh(th)) - s
+        fp = b * math.sqrt(1.0 + th * th)
+        step = f / fp
+        th -= step
+        if th < 0.0:
+            th = 0.0
+        if abs(step) < 1e-15 * (th + 1.0):
+            break
+    return min(th, th_max)
+
+
+def spiral_b(p):
+    return p / TWO_PI
+
+
+def S_arc(th, b):
+    """阿基米德螺线 r=b*theta 从 theta=0 起的弧长，严格单调增。"""
+    th = np.asarray(th, dtype=float)
+    return 0.5 * b * (th * np.sqrt(1.0 + th * th) + np.arcsinh(th))
+
+
+def theta_of_s(s, b, th_max=1e4):
+    """S 的反解：牛顿法（S 凸增，单侧收敛），向量化。"""
+    s = np.asarray(s, dtype=float)
+    th = np.sqrt(np.maximum(2.0 * s / b, 1e-16))
+    for _ in range(40):
+        f = 0.5 * b * (th * np.sqrt(1.0 + th * th) + np.arcsinh(th)) - s
+        fp = b * np.sqrt(1.0 + th * th)
+        step = f / fp
+        th = th - step
+        th = np.clip(th, 0.0, th_max)
+        if np.max(np.abs(step)) < 1e-15 * np.max(th + 1.0):
+            break
+    return th
+
+
+def spiral_point(th, b):
+    r = b * th
+    return np.stack([r * np.cos(th), r * np.sin(th)], axis=-1)
+
+
+def spiral_tangent(th, b):
+    """+theta 方向单位切向（弧参数 s 增大方向）。"""
+    c, s = np.cos(th), np.sin(th)
+    d = np.stack([c - th * s, s + th * c], axis=-1)
+    return d / np.linalg.norm(d, axis=-1, keepdims=True)
+
+
+# ---------------- 路径类 ----------------
+class Spiral:
+    """盘入螺线（自中心向外）。弧参数 s = 自中心弧长。domain [0, S_max]。"""
+
+    def __init__(self, p, th_max=400.0):
+        self.p = p
+        self.b = spiral_b(p)
+        self.th_max = th_max
+        self.s_max = float(S_arc(th_max, self.b))
+
+    def point(self, s):
+        s = np.asarray(s, dtype=float)
+        shape = s.shape
+        th = theta_of_s(np.atleast_1d(s).ravel(), self.b)
+        pt = spiral_point(th, self.b)
+        return pt.reshape(shape + (2,)) if shape else pt[0]
+
+    def tangent(self, s):
+        s = np.asarray(s, dtype=float)
+        shape = s.shape
+        th = theta_of_s(np.atleast_1d(s).ravel(), self.b)
+        t = spiral_tangent(th, self.b)
+        return t.reshape(shape + (2,)) if shape else t[0]
+
+    def point_fast(self, s):
+        th = theta_of_s_scalar(s, self.b)
+        r = self.b * th
+        return np.array([r * math.cos(th), r * math.sin(th)])
+
+    def tangent_fast(self, s):
+        th = theta_of_s_scalar(s, self.b)
+        c, sn = math.cos(th), math.sin(th)
+        d = np.array([c - th * sn, sn + th * c])
+        return d / math.hypot(d[0], d[1])
+
+
+class ReversedPath:
+    """方向翻转包装：X(mu) = inner.point(-mu)，T(mu) = -inner.tangent(-mu)。
+    用途：盘入螺线弧参数 s 向外递增（逆行进方向），包装后 mu=-s 沿行进方向递增，
+    统一 walk_chain 的"向 mu 减小方向排布链身"约定。"""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def point(self, s):
+        return self.inner.point(-np.asarray(s, dtype=float))
+
+    def tangent(self, s):
+        return -self.inner.tangent(-np.asarray(s, dtype=float))
+
+    def point_fast(self, s):
+        return self.inner.point_fast(-s)
+
+    def tangent_fast(self, s):
+        return -self.inner.tangent_fast(-s)
+
+
+class LinePath:
+    """直线退化路径（区分性测试用）：X(mu) = P0 + mu * u。"""
+
+    def __init__(self, p0, u):
+        self.p0 = np.asarray(p0, float)
+        self.u = np.asarray(u, float) / np.linalg.norm(u)
+
+    def point(self, s):
+        s = np.asarray(s, dtype=float)
+        return self.p0 + s[..., None] * self.u
+
+    def tangent(self, s):
+        s = np.asarray(s, dtype=float)
+        return np.broadcast_to(self.u, s.shape + (2,))
+
+    def point_fast(self, s):
+        return self.p0 + s * self.u
+
+    def tangent_fast(self, s):
+        return self.u
+
+
+class CirclePath:
+    """圆周退化路径（区分性测试用）：逆时针，X(mu) = O + R(cos w, sin w)。"""
+
+    def __init__(self, O, R):
+        self.O = np.asarray(O, float)
+        self.R = float(R)
+
+    def point(self, s):
+        s = np.asarray(s, dtype=float)
+        w = s / self.R
+        return self.O + self.R * np.stack([np.cos(w), np.sin(w)], axis=-1)
+
+    def tangent(self, s):
+        s = np.asarray(s, dtype=float)
+        w = s / self.R
+        d = np.stack([-np.sin(w), np.cos(w)], axis=-1)
+        return d
+
+    def point_fast(self, s):
+        w = s / self.R
+        return self.O + self.R * np.array([math.cos(w), math.sin(w)])
+
+    def tangent_fast(self, s):
+        w = s / self.R
+        return np.array([-math.sin(w), math.cos(w)])
+
+
+class TurnPath:
+    """调头路径：mu=0 在 A（盘入螺线与调头空间边界交点），沿行进方向递增。
+    pieces（依次）：
+      mu in [mu_min, 0]   盘入螺线：theta 满足 S(theta) = S_b - mu；切向 = -P'(theta) 方向
+      mu in [0, L1]       圆弧1：中心 O1 半径 R1 转向 sigma1
+      mu in [L1, L1+L2]   圆弧2：中心 O2 半径 R2 转向 sigma2
+      mu in [L1+L2, mu_max] 盘出螺线（盘入绕 O 转 pi）：X=-P(theta)，S(theta)=S_b+(mu-L)；
+                            切向 = -P'(theta) 方向（与盘入段表达式一致）
+    """
+
+    def __init__(self, p, R_disk, R1, R2, O1, O2, sigma1, sigma2, mu_min, mu_out_max):
+        self.b = spiral_b(p)
+        self.R_disk = R_disk
+        self.th_b = R_disk / self.b
+        self.S_b = float(S_arc(self.th_b, self.b))
+        self.R1, self.R2 = R1, R2
+        self.O1, self.O2 = np.asarray(O1, float), np.asarray(O2, float)
+        self.sigma1, self.sigma2 = sigma1, sigma2
+        # 弧1起点角
+        v = np.asarray(self.point_scalar(0.0)) - self.O1
+        self.phi1_0 = np.arctan2(v[1], v[0])
+        # 弧1终点 = 两圆切点 T = O1 + R1*(O2-O1)/|O2-O1|
+        dv = self.O2 - self.O1
+        self.T_tan = self.O1 + R1 * dv / np.linalg.norm(dv)
+        v = self.T_tan - self.O1
+        self.phi1_end = np.arctan2(v[1], v[0])
+        # 弧2起点角（同 T 点，相对 O2）、终点角（A'）
+        v = self.T_tan - self.O2
+        self.phi2_0 = np.arctan2(v[1], v[0])
+        v = np.asarray(self.point_scalar(0.0)) * (-1.0) - self.O2  # A' = -A
+        self.phi2_end = np.arctan2(v[1], v[0])
+        self.L1 = R1 * abs(self._ang(self.phi1_0, self.phi1_end, sigma1))
+        self.L2 = R2 * abs(self._ang(self.phi2_0, self.phi2_end, sigma2))
+        self.L = self.L1 + self.L2
+        self.mu_min = mu_min
+        self.mu_max = mu_out_max + self.L
+
+    @staticmethod
+    def _ang(a0, a1, sigma):
+        """沿转向 sigma 从 a0 到 a1 扫过的角（带符号）。"""
+        d = (a1 - a0) % TWO_PI
+        return d if sigma > 0 else d - TWO_PI
+
+    def point_scalar(self, mu):
+        if mu <= 0:
+            th = theta_of_s(self.S_b - mu, self.b)
+            return spiral_point(th, self.b)
+        if mu <= self.L1:
+            phi = self.phi1_0 + self.sigma1 * mu / self.R1
+            return self.O1 + self.R1 * np.array([np.cos(phi), np.sin(phi)])
+        if mu <= self.L:
+            phi = self.phi2_0 + self.sigma2 * (mu - self.L1) / self.R2
+            return self.O2 + self.R2 * np.array([np.cos(phi), np.sin(phi)])
+        th = theta_of_s(self.S_b + (mu - self.L), self.b)
+        return -spiral_point(th, self.b)
+
+    def point(self, s):
+        s = np.asarray(s, dtype=float)
+        shape = s.shape
+        sr = np.atleast_1d(s).ravel()
+        out = np.empty((sr.size, 2))
+        m1 = sr <= 0
+        m2 = (sr > 0) & (sr <= self.L1)
+        m3 = (sr > self.L1) & (sr <= self.L)
+        m4 = sr > self.L
+        if m1.any():
+            th = theta_of_s(self.S_b - sr[m1], self.b)
+            out[m1] = spiral_point(th, self.b)
+        if m2.any():
+            phi = self.phi1_0 + self.sigma1 * sr[m2] / self.R1
+            out[m2] = self.O1 + self.R1 * np.stack([np.cos(phi), np.sin(phi)], axis=-1)
+        if m3.any():
+            phi = self.phi2_0 + self.sigma2 * (sr[m3] - self.L1) / self.R2
+            out[m3] = self.O2 + self.R2 * np.stack([np.cos(phi), np.sin(phi)], axis=-1)
+        if m4.any():
+            th = theta_of_s(self.S_b + (sr[m4] - self.L), self.b)
+            out[m4] = -spiral_point(th, self.b)
+        return out.reshape(shape + (2,)) if shape else out[0]
+
+    def tangent(self, s):
+        s = np.asarray(s, dtype=float)
+        shape = s.shape
+        sr = np.atleast_1d(s).ravel()
+        out = np.empty((sr.size, 2))
+        m1 = sr <= 0
+        m2 = (sr > 0) & (sr <= self.L1)
+        m3 = (sr > self.L1) & (sr <= self.L)
+        m4 = sr > self.L
+        if m1.any():
+            th = theta_of_s(self.S_b - sr[m1], self.b)
+            out[m1] = -spiral_tangent(th, self.b)
+        if m2.any():
+            phi = self.phi1_0 + self.sigma1 * sr[m2] / self.R1
+            out[m2] = self.sigma1 * np.stack([-np.sin(phi), np.cos(phi)], axis=-1)
+        if m3.any():
+            phi = self.phi2_0 + self.sigma2 * (sr[m3] - self.L1) / self.R2
+            out[m3] = self.sigma2 * np.stack([-np.sin(phi), np.cos(phi)], axis=-1)
+        if m4.any():
+            th = theta_of_s(self.S_b + (sr[m4] - self.L), self.b)
+            out[m4] = -spiral_tangent(th, self.b)
+        return out.reshape(shape + (2,)) if shape else out[0]
+
+
+# ---------------- 链条求解 ----------------
+def walk_chain(path, mu_head, chords=CHORDS, bisect_n=60):
+    """从头部弧位 mu_head 出发，向 mu 减小方向逐节解弦长约束。
+    mu_head: 标量或 (M,) 数组。返回 mu (M, n)（标量输入返回 (1, n)）。"""
+    mu_head = np.atleast_1d(np.asarray(mu_head, dtype=float))
+    M = mu_head.size
+    n = len(chords) + 1
+    mu = np.empty((M, n))
+    mu[:, 0] = mu_head
+    for k in range(n - 1):
+        c = chords[k]
+        mu0 = mu[:, k]
+        X0 = path.point(mu0)                       # (M,2)
+        width = 1.35 * c * np.ones(M)
+        lo = mu0 - width
+        # 扩展括号直到 |X(lo)-X0| >= c
+        for _ in range(80):
+            d = np.linalg.norm(path.point(lo) - X0, axis=1)
+            need = d < c * (1 - 1e-14)
+            if not need.any():
+                break
+            width[need] *= 1.6
+            lo[need] = mu0[need] - width[need]
+        else:
+            raise RuntimeError("chord bracket expansion failed")
+        hi = mu0 - 1e-13
+        for _ in range(bisect_n):
+            mid = 0.5 * (lo + hi)
+            fm = np.linalg.norm(path.point(mid) - X0, axis=1) - c
+            neg = fm < 0
+            hi = np.where(neg, mid, hi)
+            lo = np.where(neg, lo, mid)
+        mu[:, k + 1] = 0.5 * (lo + hi)
+    return mu
+
+
+def chain_points(path, mu):
+    """mu (M,n) -> 点 (M,n,2)。"""
+    return path.point(np.asarray(mu))
+
+
+def chain_speeds(path, mu, sdot_head):
+    """速度递推（对弦长约束求导，精确）：
+    sdot[k+1] = (u.T_k)/(u.T_{k+1}) * sdot[k]，u = X_k - X_{k+1}。
+    mu (M,n)，sdot_head (M,) 或标量。返回 sdot (M,n)。"""
+    mu = np.atleast_2d(np.asarray(mu, dtype=float))
+    M, n = mu.shape
+    X = path.point(mu)
+    T = path.tangent(mu)
+    if np.isscalar(sdot_head):
+        sdot_head = np.full(M, float(sdot_head))
+    sdot_head = np.asarray(sdot_head, dtype=float)
+    U = X[:, :-1, :] - X[:, 1:, :]
+    a = np.einsum('mki,mki->mk', U, T[:, :-1, :])
+    b = np.einsum('mki,mki->mk', U, T[:, 1:, :])
+    if np.any(np.abs(b) < 1e-13):
+        raise RuntimeError("degenerate chord-tangent alignment")
+    sdot = np.empty((M, n))
+    sdot[:, 0] = sdot_head
+    sdot[:, 1:] = sdot_head[:, None] * np.cumprod(a / b, axis=1)
+    return sdot
+
+
+def config(path, mu_head, sdot_head, chords=CHORDS):
+    """一次求解位形与速度。返回 mu (M,n), X (M,n,2), sdot (M,n)。"""
+    mu = walk_chain(path, mu_head, chords)
+    X = chain_points(path, mu)
+    sdot = chain_speeds(path, mu, sdot_head)
+    return mu, X, sdot
+
+
+def chord_residual(path, mu, chords=CHORDS):
+    """校验：全部相邻弦长残差的最大绝对值。"""
+    X = chain_points(path, np.atleast_2d(mu))
+    d = np.linalg.norm(X[:, 1:] - X[:, :-1], axis=2)
+    return float(np.max(np.abs(d - np.asarray(chords)[None, :])))
+
+
+# ---------------- 板凳矩形与碰撞 ----------------
+def bench_rects(P, ext=EXT, hw=HALF_W):
+    """P (224,2) 把手中心 -> 板凳矩形角点 (223,4,2)。
+    角点顺序：a+n, b+n, b-n, a-n（a/b 为中心线两端延伸点）。"""
+    d = P[1:] - P[:-1]
+    L = np.linalg.norm(d, axis=1)
+    e = d / L[:, None]
+    nv = np.stack([-e[:, 1], e[:, 0]], axis=1)
+    a = P[:-1] - ext * e
+    b = P[1:] + ext * e
+    return np.stack([a + hw * nv, b + hw * nv, b - hw * nv, a - hw * nv], axis=1)
+
+
+def bench_centerlines(P, ext=EXT):
+    """扩展中心线段端点对 (223,2,2)（对照判据用）。"""
+    d = P[1:] - P[:-1]
+    L = np.linalg.norm(d, axis=1)
+    e = d / L[:, None]
+    return np.stack([P[:-1] - ext * e, P[1:] + ext * e], axis=1)
+
+
+def _seg_seg_dist(p1, p2, q1, q2):
+    """线段距离（Ericson 两段夹逼），全部 (m,2) 数组。"""
+    d1 = p2 - p1
+    d2 = q2 - q1
+    r = p1 - q1
+    a = np.einsum('mi,mi->m', d1, d1)
+    e = np.einsum('mi,mi->m', d2, d2)
+    b = np.einsum('mi,mi->m', d1, d2)
+    c = np.einsum('mi,mi->m', d1, r)
+    f = np.einsum('mi,mi->m', d2, r)
+    denom = a * e - b * b
+    safe = np.where(np.abs(denom) > 1e-300, denom, 1.0)
+    s = np.clip(np.where(np.abs(denom) > 1e-300, (b * f - c * e) / safe, 0.0), 0.0, 1.0)
+    esafe = np.where(e > 1e-300, e, 1.0)
+    t = np.clip(np.where(e > 1e-300, (b * s + f) / esafe, 0.0), 0.0, 1.0)
+    asafe = np.where(a > 1e-300, a, 1.0)
+    s = np.clip(np.where(a > 1e-300, (b * t - c) / asafe, 0.0), 0.0, 1.0)
+    c1 = p1 + s[:, None] * d1
+    c2 = q1 + t[:, None] * d2
+    return np.linalg.norm(c1 - c2, axis=1)
+
+
+def _sat_overlap(C1, C2):
+    """两凸四边形是否重叠（SAT，8 轴：各自 4 条边的外法向）。C (m,4,2)。"""
+    E1 = np.roll(C1, -1, axis=1) - C1
+    E2 = np.roll(C2, -1, axis=1) - C2
+    m = C1.shape[0]
+    overlap = np.ones(m, dtype=bool)
+    for blk in (np.stack([E1[..., 1], -E1[..., 0]], axis=-1),
+                np.stack([E2[..., 1], -E2[..., 0]], axis=-1)):
+        for e in range(4):
+            ax = blk[:, e, :]                       # (m,2)：全体候选对的第 e 条边法向
+            ax = ax / np.linalg.norm(ax, axis=1, keepdims=True)
+            p1 = np.einsum('mij,mj->mi', C1, ax)
+            p2 = np.einsum('mij,mj->mi', C2, ax)
+            gap = (p1.max(axis=1) < p2.min(axis=1)) | (p2.max(axis=1) < p1.min(axis=1))
+            overlap &= ~gap
+    return overlap
+
+
+def nonadjacent_pairs(n_bench=N_BENCH):
+    i, j = np.triu_indices(n_bench, k=2)
+    return np.stack([i, j], axis=1)
+
+
+PAIRS = nonadjacent_pairs()
+
+
+def make_pair_index(rects):
+    """包围圆剪枝所需的中心/半径（对固定板凳几何每次位形都变，现场算）。"""
+    centers = rects.mean(axis=1)
+    radii = np.linalg.norm(rects - centers[:, None, :], axis=2).max(axis=1)
+    return centers, radii
+
+
+def min_bench_distance(P, pairs=PAIRS, tol_radius=0.0):
+    """非相邻板凳对最小距离（主判据）。返回 (dmin, (i,j), n_cand)。
+    tol_radius: 包围圆放余量（应保持 0——剪枝若发生则真实距离>0）。"""
+    rects = bench_rects(P)
+    centers, radii = make_pair_index(rects)
+    pi_ = pairs[:, 0]
+    pj_ = pairs[:, 1]
+    d2 = np.einsum('mi,mi->m', centers[pi_] - centers[pj_], centers[pi_] - centers[pj_])
+    cand = d2 <= (radii[pi_] + radii[pj_] + tol_radius) ** 2
+    if not cand.any():
+        return np.inf, None, 0
+    idx = pairs[cand]
+    C1 = rects[idx[:, 0]]
+    C2 = rects[idx[:, 1]]
+    ov = _sat_overlap(C1, C2)
+    if ov.any():
+        k = np.argmax(ov)
+        return 0.0, (int(idx[k, 0]), int(idx[k, 1])), int(cand.sum())
+    best = np.full(idx.shape[0], np.inf)
+    for a in range(4):
+        a2 = (a + 1) % 4
+        for b in range(4):
+            b2 = (b + 1) % 4
+            dd = _seg_seg_dist(C1[:, a], C1[:, a2], C2[:, b], C2[:, b2])
+            best = np.minimum(best, dd)
+    k = int(np.argmin(best))
+    return float(best[k]), (int(idx[k, 0]), int(idx[k, 1])), int(cand.sum())
+
+
+def min_centerline_distance(P, pairs=PAIRS):
+    """对照判据：扩展中心线段间最小距离。返回 (dmin, (i,j))。"""
+    segs = bench_centerlines(P)
+    a = segs[:, 0, :]
+    b = segs[:, 1, :]
+    centers = segs.mean(axis=1)
+    radii = np.linalg.norm(segs - centers[:, None, :], axis=2).max(axis=1)
+    pi_, pj_ = pairs[:, 0], pairs[:, 1]
+    d2 = np.einsum('mi,mi->m', centers[pi_] - centers[pj_], centers[pi_] - centers[pj_])
+    cand = d2 <= (radii[pi_] + radii[pj_]) ** 2
+    if not cand.any():
+        return np.inf, None
+    idx = pairs[cand]
+    best = np.full(idx.shape[0], np.inf)
+    for k in range(idx.shape[0]):
+        i, j = idx[k]
+        # 单对：两次端点-线段 + 一次线段-线段的最小
+        p1, p2 = segs[i, 0], segs[i, 1]
+        q1, q2 = segs[j, 0], segs[j, 1]
+        d = _seg_seg_dist(p1[None], p2[None], q1[None], q2[None])[0]
+        best[k] = d
+    k = int(np.argmin(best))
+    return float(best[k]), (int(idx[k, 0]), int(idx[k, 1]))

@@ -1,0 +1,238 @@
+# -*- coding: utf-8 -*-
+"""
+2025 CUMCM A 题 烟幕干扰弹投放策略 —— 公共核心模块 (v2_test)
+================================================================
+口径（已回显用户确认，见 solving_records/问题1.md）：
+  - g = 9.8 m/s^2
+  - 云团半径 R = 10 m（"中心 10 m 范围"=半径）
+  - 遮蔽窗口 = [t_b, min(t_b+20, t_hit)]，t_hit 为导弹命中假目标时刻
+  - 起爆点约束 z_B >= 0（弹不触地起爆）
+  - 云团中心下沉不截断于地面，但所有解监控触地
+  - 双判据：体判据（圆柱表面采样点全遮蔽，正式口径）+ 点判据（柱心单点，对比证据）
+数值实现：
+  - 判定原语 = 点到线段距离平方 <= R^2（投影参数 clamp 到 [0,1]，含端点）
+  - f(t) = max_k dist^2_k(t) - R^2 分段光滑，网格 0.005 s 定位变号段 + brentq 精化端点
+  - 独立细网格扫描（dt=5e-4，向量化）作 G2 异源互证
+"""
+import numpy as np
+from scipy.optimize import brentq
+
+# ---------------------------------------------------------------- 常数与场景
+G = 9.8                      # P1: 重力加速度 (m/s^2)
+R_CLOUD = 10.0               # P2: 云团半径 (m)
+R2 = R_CLOUD ** 2
+SINK = 3.0                   # 云团下沉速度 (m/s)
+T_EFF = 20.0                 # 云团有效持续时间 (s)
+V_MISSILE = 300.0            # 导弹速度 (m/s)
+V_UAV_MIN, V_UAV_MAX = 70.0, 140.0   # 无人机速度范围 (m/s)
+DT_MIN = 1.0                 # 同机两弹投放最小间隔 (s)
+
+P_FAKE = np.array([0.0, 0.0, 0.0])            # 假目标（原点）
+T_TARGET_R, T_TARGET_H = 7.0, 10.0            # 真目标圆柱: 半径7 高10
+P_TARGET_BASE = np.array([0.0, 200.0, 0.0])   # 真目标下底面圆心
+
+MISSILES = {
+    'M1': np.array([20000.0, 0.0, 2000.0]),
+    'M2': np.array([19000.0, 600.0, 2100.0]),
+    'M3': np.array([18000.0, -600.0, 1900.0]),
+}
+UAVS = {
+    'FY1': np.array([17800.0, 0.0, 1800.0]),
+    'FY2': np.array([12000.0, 1400.0, 1400.0]),
+    'FY3': np.array([6000.0, -3000.0, 700.0]),
+    'FY4': np.array([11000.0, 2000.0, 1800.0]),
+    'FY5': np.array([13000.0, -2000.0, 1300.0]),
+}
+E_M = {mid: -p / np.linalg.norm(p) for mid, p in MISSILES.items()}   # 指向原点
+T_HIT = {mid: np.linalg.norm(p) / V_MISSILE for mid, p in MISSILES.items()}
+
+# 方向向量符号曾出错（曾写成背离原点），T1 手验捕获后修正为 -P0/|P0| —— 勿改回。
+def missile_pos(mid, t):
+    """导弹 t 时刻位置（A1：直指假目标原点）。t 可为标量或 (T,) 数组。"""
+    return MISSILES[mid] + V_MISSILE * t * E_M[mid]
+
+
+def uav_pos(uav_id, t, theta, v):
+    """无人机 t 时刻位置（A2：t=0 瞬时转向，等高度匀速直线）。"""
+    p0 = UAVS[uav_id]
+    return p0 + v * t * np.array([np.cos(theta), np.sin(theta), 0.0])
+
+
+def drop_pos(uav_id, t_d, theta, v):
+    """投放点（=无人机在 t_d 时刻位置）。"""
+    return uav_pos(uav_id, t_d, theta, v)
+
+
+def burst_pos(uav_id, t_d, tau, theta, v):
+    """起爆点（A3：平抛）。约束 z >= 0（P4）。"""
+    d = drop_pos(uav_id, t_d, theta, v)
+    return d + v * tau * np.array([np.cos(theta), np.sin(theta), 0.0]) \
+             + np.array([0.0, 0.0, -0.5 * G * tau * tau])
+
+
+def cloud_center(b, t_b, t):
+    """云团中心（A4：起爆后以 3 m/s 匀速下沉）。t 标量或数组 -> (…,3)。"""
+    return np.asarray(b) + np.array([0.0, 0.0, -SINK]) * (t - t_b)
+
+
+def cyl_samples(n_theta=24, n_z=3):
+    """真目标圆柱表面采样点（体判据）：3 个高度层 x 24 圆周 = 72 点。"""
+    thetas = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False)
+    zs = np.linspace(0.0, T_TARGET_H, n_z)
+    pts = [[T_TARGET_R * np.cos(th), T_TARGET_R * np.sin(th), P_TARGET_BASE[2] + z]
+           for z in zs for th in thetas]
+    return np.array(pts)
+
+
+CYL_PTS = cyl_samples()          # (72,3)
+CENTER_PT = np.array([0.0, P_TARGET_BASE[1], T_TARGET_H / 2.0])   # 点判据：柱心
+
+
+# ---------------------------------------------------------------- 向量化判据核
+def dist2_time_grid(C, M, P):
+    """云心序列到视线段的距离平方矩阵。
+
+    C: (T,3) 云心序列; M: (T,3) 导弹位置序列; P: (K,3) 目标判定点。
+    返回 (T,K)：元素 = dist(C_t, seg[M_t -> P_k])^2。
+    分块广播防内存爆炸（T=40000,K=864 时 (T,K,3) 达 ~800MB）。
+    """
+    T = len(C)
+    out = np.empty((T, len(P)))
+    chunk = max(1, int(4_000_000 // max(len(P), 1)))   # 每块 ~4M 浮点
+    for s in range(0, T, chunk):
+        e = min(s + chunk, T)
+        D = P[None, :, :] - M[s:e, None, :]            # (t,K,3) 视线方向
+        W = C[s:e, None, :] - M[s:e, None, :]          # (t,K,3) 导弹->云心
+        dd = np.einsum('tki,tki->tk', D, D)
+        wd = np.einsum('tki,tki->tk', W, D)
+        tstar = np.clip(wd / np.where(dd > 0, dd, 1.0), 0.0, 1.0)   # clamp 含端点
+        # 必须直接算 |W - t* D|^2；捷径 |W|^2 - t*(W·D) 在 clamp 后不成立（T4b 抓到过）
+        diff = W - tstar[:, :, None] * D
+        d2 = np.einsum('tki,tki->tk', diff, diff)
+        out[s:e] = np.maximum(d2, 0.0)                 # 防浮点负
+    return out
+
+
+def dist2_cloud_to_seg(c, m, p):
+    """单点接口：云心 c (3,) 或 (N,3) 到线段 [m(3), p(3)] 距离平方 -> (N,)。"""
+    c = np.atleast_2d(c)
+    return dist2_time_grid(c, np.tile(m, (len(c), 1)), np.atleast_2d(p))[:, 0]
+
+
+def f_body(C, M, P):
+    """体判据 f(t) = max_k dist^2_k - R^2（<=0 ⇔ 全部采样点被遮）。C,M:(T,3), P:(K,3)。"""
+    return dist2_time_grid(C, M, P).max(axis=1) - R2
+
+
+def f_point(C, M):
+    """点判据 f(t)（柱心单点）。C,M:(T,3)。"""
+    return dist2_time_grid(C, M, CENTER_PT[None, :])[:, 0] - R2
+
+
+# ---------------------------------------------------------------- 轨迹批量
+def traj_cloud(b, t_b, ts):
+    """云心轨迹 (T,3)。"""
+    return cloud_center(np.asarray(b), t_b, ts)
+
+
+def shaded_intervals_core(f_of_t, t_lo, t_hi, grid_dt=0.005):
+    """通用区间提取：f(t)<=0 的区间列表。
+
+    网格 0.005 s 定位（根定位误差<=0.005，brentq 后 <1e-12）；
+    风险 = 宽度 <2 格的尖区间漏检 -> 由独立细网格互证兜底（test/q1 落实）。
+    """
+    if t_hi <= t_lo:
+        return []
+    n = int(np.ceil((t_hi - t_lo) / grid_dt)) + 1
+    ts = np.linspace(t_lo, t_hi, n)
+    fs = f_of_t(ts)
+    neg = fs <= 0.0
+    intervals = []
+    i = 0
+    while i < n:
+        if neg[i]:
+            j = i
+            while j + 1 < n and neg[j + 1]:
+                j += 1
+            a, b2 = ts[i], ts[j]
+            # 边界精化（段内变号才精化；neg 段端点若在窗口内则必为变号边界）
+            if i > 0:
+                a = brentq(f_of_t, ts[i - 1], ts[i], xtol=1e-13)
+            if j < n - 1:
+                b2 = brentq(f_of_t, ts[j], ts[j + 1], xtol=1e-13)
+            intervals.append((a, b2))
+            i = j + 1
+        else:
+            i += 1
+    return intervals
+
+
+def _window(t_b, t_hit):
+    """遮蔽评估窗口（A4 ∩ A1 裁剪）。"""
+    return max(t_b, 0.0), min(t_b + T_EFF, t_hit)
+
+
+def shaded_intervals(b, t_b, mid, tgt_pts, t_hit, grid_dt=0.005):
+    """体判据遮蔽区间（单弹）。"""
+    t_lo, t_hi = _window(t_b, t_hit)
+    if t_hi <= t_lo:
+        return []
+
+    def f_of_t(ts):
+        ts = np.atleast_1d(np.asarray(ts, dtype=float))
+        return f_body(traj_cloud(b, t_b, ts), missile_pos(mid, ts), tgt_pts)
+
+    return shaded_intervals_core(f_of_t, t_lo, t_hi, grid_dt)
+
+
+def shaded_intervals_point(b, t_b, mid, t_hit, grid_dt=0.005):
+    """点判据遮蔽区间（单弹）。"""
+    t_lo, t_hi = _window(t_b, t_hit)
+    if t_hi <= t_lo:
+        return []
+
+    def f_of_t(ts):
+        ts = np.atleast_1d(np.asarray(ts, dtype=float))
+        return f_point(traj_cloud(b, t_b, ts), missile_pos(mid, ts))
+
+    return shaded_intervals_core(f_of_t, t_lo, t_hi, grid_dt)
+
+
+def union_length(intervals_list):
+    """区间并集总长（A6）。"""
+    if not intervals_list:
+        return 0.0
+    ivs = sorted(intervals_list)
+    tot, cs, ce = 0.0, ivs[0][0], ivs[0][1]
+    for a, b2 in ivs[1:]:
+        if a <= ce:
+            ce = max(ce, b2)
+        else:
+            tot += ce - cs
+            cs, ce = a, b2
+    return tot + (ce - cs)
+
+
+def body_mask_for_cloud(b, t_b, mid, tgt_pts, ts):
+    """体判据布尔掩码：云团在 ts 各时刻是否完全遮蔽（bool (T,)）。供互证用。"""
+    ts = np.asarray(ts, dtype=float)
+    fs = f_body(traj_cloud(b, t_b, ts), missile_pos(mid, ts), tgt_pts)
+    return fs <= 0.0
+
+
+def grid_union_length(bursts, mid, tgt_pts, t_hit, dt=0.0005):
+    """细网格扫描独立复算并集时长（G2 互证，与 brentq 路径不同实现）。
+
+    返回 (时长, bool 掩码 (T,) 并集)。
+    """
+    t0 = min(tb for _, tb in bursts)
+    t1 = min(max(tb for _, tb in bursts) + T_EFF, t_hit)
+    if t1 <= t0:
+        return 0.0, None
+    ts = np.arange(t0, t1 + 0.5 * dt, dt)
+    union_mask = np.zeros(len(ts), dtype=bool)
+    for b, tb in bursts:
+        m = (ts >= tb - 1e-12) & (ts <= tb + T_EFF + 1e-12)
+        if m.any():
+            union_mask[m] |= body_mask_for_cloud(b, tb, mid, tgt_pts, ts[m])
+    return float(union_mask.sum() * dt), union_mask

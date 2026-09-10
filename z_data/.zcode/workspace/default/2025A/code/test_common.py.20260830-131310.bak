@@ -1,0 +1,88 @@
+# -*- coding: utf-8 -*-
+"""公共模块验证：单位测试 + 手算锚点 + 区分性测试（G1/G4 闸门交付物）。"""
+import numpy as np
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import (G, R_CLOUD, MISSILES, UAVS, T_END, TGT_MID, target_samples,
+                    dist_point_to_segment, missile_pos, bomb_trajectory,
+                    burst_point, union_length, shade_boolean_point, _shade_boolean)
+
+ok = True
+def check(name, cond, detail=""):
+    global ok
+    print(f"[{'PASS' if cond else 'FAIL'}] {name} {detail}")
+    if not cond:
+        ok = False
+
+# ---- 1. 点到线段距离 单位测试 ----
+a, b = np.array([0., 0, 0]), np.array([10., 0, 0])
+check("dist: 点在线段上", abs(dist_point_to_segment(np.array([[5., 0, 0]]), a, b)[0]) < 1e-12)
+check("dist: 垂足在段内", abs(dist_point_to_segment(np.array([[5., 3, 4]]), a, b)[0] - 5.0) < 1e-12)
+check("dist: 垂足在端点外(取端点)", abs(dist_point_to_segment(np.array([[13., 4, 0]]), a, b)[0] - 5.0) < 1e-12)
+
+# ---- 2. 导弹方向向量符号手验（G4：方向向量符号是#1静默bug）----
+d1 = -MISSILES['M1'] / np.linalg.norm(MISSILES['M1'])
+check("M1方向=手算(-0.995037,0,-0.099504)",
+      np.allclose(d1, [-0.995037, 0, -0.099504], atol=1e-6), f"实际={d1}")
+check("方向指向原点: M1(0)=原点", np.allclose(missile_pos('M1', np.array([T_END['M1']]))[0], [0, 0, 0], atol=1e-6))
+for k in MISSILES:
+    check(f"T_END[{k}]>0 合理", 55 < T_END[k] < 70, f"={T_END[k]:.4f}s")
+
+# ---- 3. Q1 手算锚点（脚本 print，禁止心算入论文）----
+uav0 = UAVS['FY1']
+Pd = uav0 + 120 * 1.5 * np.array([-1., 0, 0])
+check("Q1投放点=手算(17620,0,1800)", np.allclose(Pd, [17620, 0, 1800]), f"实际={Pd}")
+B, tb = burst_point(uav0, 180.0, 120.0, 1.5, 3.6)
+z_hand = 1800 - 0.5 * G * 3.6 ** 2
+check("Q1起爆点x=手算17188", abs(B[0] - 17188) < 1e-9, f"实际={B[0]}")
+check("Q1起爆点z=手算(1800-4.9*3.6^2)", abs(B[2] - z_hand) < 1e-9, f"实际={B[2]:.6f} 手算={z_hand:.6f}")
+check("Q1起爆时刻=手算5.1", abs(tb - 5.1) < 1e-12)
+
+# ---- 4. union_length 单位测试 ----
+check("union [(0,2),(1.5,3)]=3", abs(union_length([(0, 2), (1.5, 3)]) - 3.0) < 1e-12)
+check("union [(0,1),(2,3)]=2", abs(union_length([(0, 1), (2, 3)]) - 2.0) < 1e-12)
+check("union 空=0", union_length([]) == 0.0)
+
+# ---- 5. 区分性测试（跨抽象层：点判据判遮、体判据判不遮的构造案例）----
+# 构造：云心偏离中点视线接近 R，使部分采样点视线距云心 > R。
+from common import dist_point_to_segments
+samples = target_samples()
+found = None
+m = MISSILES['M1']
+line_mid = TGT_MID - m
+L = np.linalg.norm(line_mid)
+u = line_mid / L
+base = TGT_MID - 3000 * u   # 视线上距目标 3000 m 处
+perp1 = np.cross(u, [0, 0, 1.0]); perp1 /= np.linalg.norm(perp1)
+perp2 = np.cross(u, perp1); perp2 /= np.linalg.norm(perp2)
+for off in np.arange(4.0, 9.5, 0.1):
+    for ang in np.arange(0, np.pi, np.pi / 24):
+        c = base + off * (np.cos(ang) * perp1 + np.sin(ang) * perp2)
+        dp = dist_point_to_segments(c, m[None, :], TGT_MID[None, :])[0]
+        if dp > R_CLOUD:
+            continue
+        db = dist_point_to_segments(c, np.repeat(m[None, :], samples.shape[0], axis=0), samples)
+        if np.all(db <= R_CLOUD):
+            continue
+        found = (c.copy(), dp, db.max())
+        break
+    if found:
+        break
+if found:
+    c, dp, dmax = found
+    pt = shade_boolean_point(c[None, :], m[None, :], TGT_MID)[0]
+    bd = _shade_boolean(c[None, :], m[None, :], samples)[0]
+    check("区分性: 点判据=遮蔽", pt is True, f"dist(中点视线)={dp:.3f}")
+    check("区分性: 体判据=不遮蔽", bd is False, f"max采样点视线距={dmax:.3f}>R=10")
+    print(f"    构造云心 c={np.round(c, 3)}，两抽象层答案不同 → 判据可区分，体判据口径更严格")
+else:
+    check("区分性: 构造出差异案例", False, "未找到两判据不同的案例 → 需复核")
+
+# ---- 6. 采样点集基本量 ----
+S = target_samples()
+check("采样点数=108", S.shape[0] == 108, f"实际={S.shape[0]}")
+check("采样点位于圆柱表面(z∈{0,5,10}, r=7)",
+      np.allclose(np.hypot(S[:, 0] - 0, S[:, 1] - 200), 7.0) and set(np.round(S[:, 2], 6)) == {0.0, 5.0, 10.0})
+
+print("\n==== 总结:", "全部通过" if ok else "存在失败项", "====")
+sys.exit(0 if ok else 1)

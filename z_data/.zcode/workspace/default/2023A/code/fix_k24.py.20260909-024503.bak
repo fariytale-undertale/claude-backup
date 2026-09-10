@@ -1,0 +1,31 @@
+# -*- coding: utf-8 -*-
+"""G11 口径统一补丁：问题一交付与灵敏度全部升到 K=24。
+- q1_solve.py 行24 主评估 K=12→24；行63/66 灵敏度 K=12→24；K 扫描 (6,24)→(6,12)，打印标签相应改
+- fig_q1_maps.py 评估 K=12→24
+旧值（K12）：eta=0.6058 E=37.0281 u=0.5894；新值以运行输出为准。"""
+import io
+
+for path, subs in [
+    (r"D:/z_data/.zcode/workspace/default/2023A/code/q1_solve.py", [
+        ('eg.evaluate_field(mirrors, z0, w, h, tower, K=12, QN=64, cutoff=50.0)',
+         'eg.evaluate_field(mirrors, z0, w, h, tower, K=24, QN=64, cutoff=50.0)'),
+        ('r_c = eg.evaluate_field(mirrors, z0, w, h, tower, K=12, QN=64, cutoff=co)',
+         'r_c = eg.evaluate_field(mirrors, z0, w, h, tower, K=24, QN=64, cutoff=co)'),
+        ('r_s = eg.evaluate_field(mirrors, z0, w, h, tower, K=12, QN=64, cutoff=50.0, sun_half=eg.SUN_HALF * f)',
+         'r_s = eg.evaluate_field(mirrors, z0, w, h, tower, K=24, QN=64, cutoff=50.0, sun_half=eg.SUN_HALF * f)'),
+        ('for K in (6, 24):', 'for K in (6, 12):'),
+        ('print(f"K=6:  eta={sens[\'K6_eta\']:.6f}  E={sens[\'K6_E_MW\']:.4f} MW")',
+         'print(f"K=6:  eta={sens[\'K6_eta\']:.6f}  E={sens[\'K6_E_MW\']:.4f} MW")\nprint(f"K=12: eta={sens[\'K12_eta\']:.6f}  E={sens[\'K12_E_MW\']:.4f} MW")'),
+        ('print(f"K=12: eta={ann[\'eta\']:.6f}  E={ann[\'E_MW\']:.4f} MW")',
+         'print(f"K=24: eta={ann[\'eta\']:.6f}  E={ann[\'E_MW\']:.4f} MW")'),
+    ]),
+    (r"D:/z_data/.zcode/workspace/default/2023A/code/fig_q1_maps.py", [
+        ('(0.0, 0.0), K=12, QN=64, cutoff=50.0)', '(0.0, 0.0), K=24, QN=64, cutoff=50.0)'),
+    ]),
+]:
+    s = io.open(path, encoding="utf-8").read()
+    for old, new in subs:
+        assert s.count(old) == 1, f"{path}: {old[:50]}... count={s.count(old)}"
+        s = s.replace(old, new)
+    io.open(path, "w", encoding="utf-8", newline="\n").write(s)
+print("K24 patch OK")

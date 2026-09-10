@@ -1,0 +1,513 @@
+#!/usr/bin/env python3
+"""harness-gates: 错误指纹+双轨恢复预算 与 跨问结论 stale 传播的确定性执行器。
+
+设计移植自 sghwr/AutoMM（scripts/automm/failure_policy.py 与 stale 传播机制），
+适配单人 agent 数模工作流。核心原则：机器强制，不靠 LLM 自觉——
+恢复预算超限与 stale 未清时由退出码拦截，不依赖提示词遵守。
+
+状态目录 <root>/.gates/（root 默认为当前目录）：
+  recovery.json    机制一状态（恢复计数、指纹、模式）
+  conclusions.json 机制二状态（各问结论 hash、依赖图、consumed 快照、stale 集）
+  gates_log.jsonl  全部事件追加式台账（只追加，不修改）
+
+全部输出为一个 JSON 对象（stdout，UTF-8）。退出码：
+  0 正常；2 check 发现 stale；4 人工阻塞；5 harness 不变量错误；
+  6 降级审查（停止自动重试）；1 参数/运行错误。
+仅用 Python 标准库，兼容 3.10+。
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+# 进展判定只认这 5 个规范键：改变其中之一才算"生产性进展"。
+# 指纹载荷也只含这 5 键——防止用任意注释/时间戳重置指纹绕过收敛检测。
+CANONICAL_KEYS = ("code_hash", "error_fingerprint", "feasibility", "strategy", "formulation_version")
+
+FAILURE_CLASSES = (
+    "harness_invariant",        # 状态/账本/判据自相矛盾（hash 对不上、computed-but-not-stored）
+    "agent_transport",          # 工具调用/模型传输层故障（超时、连接中断）
+    "infrastructure_transient",  # 环境级瞬时故障（文件占用、网络、内存）
+    "code_runtime",             # 脚本运行异常
+    "model_infeasible",         # 模型无可行解/约束冲突
+    "quality_warning",          # 结果可疑（贴边解、方向反常）但不违反硬约束
+    "external_human_required",  # 需用户决策（G0 参数语义、口径选择、互斥方案）
+)
+INFRA_CLASSES = {"agent_transport", "infrastructure_transient"}
+HUMAN_BLOCK_CLASSES = {"external_human_required"}
+
+LIMITS = {
+    "same_fingerprint_limit": 2,   # 同指纹连续 N 轮 -> 收敛模式
+    "max_productive_rounds": 10,   # 有生产性进展的恢复轮数上限 -> 降级审查
+    "infrastructure_retries": 3,   # infra 类轮数上限（独立预算，不与他类共享）-> 降级审查
+}
+
+STALE_EXIT = 2
+HUMAN_EXIT = 4
+INVARIANT_EXIT = 5
+DEGRADED_EXIT = 6
+HISTORY_CAP = 20
+
+
+def now() -> str:
+    # 微秒精度：consume 的时间戳守卫要求严格递增，秒级会让同秒的 record→consume 被误拒。
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def normalize_error(text: str) -> str:
+    """空白规范化并截断：换行/缩进差异不影响指纹稳定性。"""
+    return " ".join(str(text).split())[:2000]
+
+
+def fingerprint(failure_class: str, error: str, progress: dict) -> str:
+    payload = {
+        "failure_class": failure_class,
+        "error": normalize_error(error),
+        "progress": {k: progress[k] for k in CANONICAL_KEYS if progress.get(k)},
+    }
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:20]
+
+
+def hash_file(path: Path, root: Path) -> str:
+    """AutoMM hash_path 语义：相对路径编入摘要，同内容不同路径不同 hash。"""
+    rel = path.resolve().relative_to(root.resolve()).as_posix()
+    h = hashlib.sha256()
+    h.update(rel.encode("utf-8"))
+    h.update(path.read_bytes())
+    return h.hexdigest()[:20]
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    """同目录 tempfile + os.replace；Windows 文件被占用时退避重试。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    for attempt in range(5):
+        try:
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.2 * (attempt + 1))
+
+
+def append_log(root: Path, event: dict) -> None:
+    log = root / ".gates" / "gates_log.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps({"at": now(), **event}, ensure_ascii=False)
+    for attempt in range(5):
+        try:
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.2 * (attempt + 1))
+
+
+def load_json(path: Path, default: dict) -> dict:
+    if not path.exists():
+        return default
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------- 机制一：恢复预算
+
+ALLOWED_ACTIONS = {
+    "normal": ["按计划继续；重试必须换 code_hash/策略/口径之一，盲跑同版本无效"],
+    "convergence": [
+        "停止提交同型变体运行",
+        "整理已有产物、复核判据与实现一致性",
+        "定位根因后向用户报告，或以实质变化（规范键变更）解除",
+    ],
+    "degraded_review": [
+        "停止自动重试",
+        "汇总已试方案清单与证据，交用户审查决策",
+    ],
+    "human_blocked": ["向用户提出具体决策问题（参数语义/口径/互斥方案），拿到答复后 resume"],
+    "harness_invariant_error": ["停止推进", "对账状态与台账，修复不一致", "向用户报告矛盾"],
+}
+
+
+def default_recovery() -> dict:
+    return {
+        "total_rounds": 0,
+        "productive_rounds": 0,
+        "infra_rounds": 0,
+        "same_fingerprint_streak": 0,
+        "mode": "normal",
+        "recovery_status": "normal",
+        "last_fingerprint": None,
+        "last_failure_class": None,
+        "last_progress": {},
+    }
+
+
+def verdict_of(status: str, mode: str) -> dict:
+    return {
+        "recovery_status": status,
+        "mode": mode,
+        "allowed_actions": ALLOWED_ACTIONS[status if status in ("human_blocked", "harness_invariant_error") else mode],
+        "automatic_retry_allowed": status in ("normal", "retrying") and mode in ("normal", "convergence"),
+    }
+
+
+def cmd_fail(args) -> dict:
+    if args.cls not in FAILURE_CLASSES:
+        raise SystemExit(f"未知失败类别 {args.cls}，可选：{', '.join(FAILURE_CLASSES)}")
+    progress = {}
+    for item in args.progress or []:
+        key, sep, value = item.partition("=")
+        if not sep:
+            raise SystemExit(f"--progress 须为 key=value 形式，得到 {item!r}")
+        progress[key.strip()] = value.strip()
+
+    root = args.root.resolve()
+    rec_path = root / ".gates" / "recovery.json"
+    state = load_json(rec_path, default_recovery())
+
+    canonical = {k: progress[k] for k in CANONICAL_KEYS if progress.get(k)}
+    last = state.get("last_progress") or {}
+    productive = any(canonical.get(k) not in (None, "") and canonical.get(k) != last.get(k) for k in CANONICAL_KEYS)
+
+    fp = fingerprint(args.cls, args.error, canonical)
+    state["total_rounds"] = int(state.get("total_rounds", 0)) + 1
+    state["productive_rounds"] = int(state.get("productive_rounds", 0)) + (1 if productive else 0)
+    if args.cls in INFRA_CLASSES:
+        state["infra_rounds"] = int(state.get("infra_rounds", 0)) + 1
+    state["same_fingerprint_streak"] = (
+        int(state.get("same_fingerprint_streak", 0)) + 1 if fp == state.get("last_fingerprint") else 1
+    )
+
+    # 模式判定：生产性进展是唯一自动解除收敛/降级的途径；降级后只能 resume 复位。
+    if productive:
+        mode = "degraded_review" if state["productive_rounds"] >= LIMITS["max_productive_rounds"] else "normal"
+    elif state["same_fingerprint_streak"] >= LIMITS["same_fingerprint_limit"]:
+        mode = "convergence"
+    else:
+        mode = state.get("mode", "normal")
+    if args.cls in INFRA_CLASSES and state["infra_rounds"] > LIMITS["infrastructure_retries"]:
+        mode = "degraded_review"
+
+    if args.cls in HUMAN_BLOCK_CLASSES:
+        status = "human_blocked"
+    elif args.cls == "harness_invariant":
+        status = "harness_invariant_error"
+    elif mode == "degraded_review":
+        status = "degraded_review"
+    else:
+        status = "retrying"
+
+    state.update({
+        "mode": mode,
+        "recovery_status": status,
+        "last_fingerprint": fp,
+        "last_failure_class": args.cls,
+        "last_progress": {**last, **canonical},
+        "last_error": normalize_error(args.error),
+        "updated_at": now(),
+    })
+    atomic_write_json(rec_path, state)
+    append_log(root, {"event": "fail", "class": args.cls, "fingerprint": fp,
+                      "productive": productive, "mode": mode, "status": status})
+
+    exit_code = {"human_blocked": HUMAN_EXIT, "harness_invariant_error": INVARIANT_EXIT,
+                 "degraded_review": DEGRADED_EXIT}.get(status, 0)
+    return {"command": "fail", "fingerprint": fp, "productive": productive,
+            "streak": state["same_fingerprint_streak"], "total_rounds": state["total_rounds"],
+            "productive_rounds": state["productive_rounds"], "infra_rounds": state["infra_rounds"],
+            "exit_code": exit_code, **verdict_of(status, mode)}
+
+
+def cmd_resume(args) -> dict:
+    root = args.root.resolve()
+    rec_path = root / ".gates" / "recovery.json"
+    state = load_json(rec_path, default_recovery())
+    cleared = {
+        "cleared_status": state.get("recovery_status"),
+        "cleared_mode": state.get("mode"),
+        "cleared_rounds": {k: state.get(k) for k in
+                           ("total_rounds", "productive_rounds", "infra_rounds", "same_fingerprint_streak")},
+    }
+    fresh = default_recovery()
+    state.update({k: fresh[k] for k in fresh if k != "updated_at"})
+    state["updated_at"] = now()
+    atomic_write_json(rec_path, state)
+    append_log(root, {"event": "resume", "note": args.note, **cleared})
+    return {"command": "resume", **cleared, "recovery_status": "normal", "mode": "normal",
+            "exit_code": 0, **verdict_of("normal", "normal")}
+
+
+def cmd_recover_status(args) -> dict:
+    state = load_json(args.root.resolve() / ".gates" / "recovery.json", default_recovery())
+    status, mode = state.get("recovery_status", "normal"), state.get("mode", "normal")
+    return {"command": "status", "state": state, "exit_code":
+            {"human_blocked": HUMAN_EXIT, "harness_invariant_error": INVARIANT_EXIT,
+             "degraded_review": DEGRADED_EXIT}.get(status, 0), **verdict_of(status, mode)}
+
+
+# ---------------------------------------------------------------- 机制二：stale 传播
+
+def default_conclusions() -> dict:
+    return {"questions": {}, "dependencies": {}, "consumed": {}, "stale": {}}
+
+
+def topo_order(deps: dict, questions: dict) -> list:
+    """依赖拓扑序（上游在前）；用于级联 stale 的单趟传播。"""
+    order, seen = [], set()
+
+    def visit(q: str, stack: set) -> None:
+        if q in seen or q in stack:
+            return
+        stack.add(q)
+        for u in deps.get(q, []):
+            visit(u, stack)
+        stack.discard(q)
+        seen.add(q)
+        order.append(q)
+
+    for q in questions:
+        visit(q, set())
+    return order
+
+
+def sync_stale(c: dict) -> None:
+    """从 (hash, consumed, 依赖图) 全量重算 stale 集——record/consume/check 共用同一真值源。"""
+    questions, deps = c["questions"], c["dependencies"]
+    new_stale: dict = {}
+    for q in topo_order(deps, questions):
+        reasons, direct_root = [], None
+        for u in deps.get(q, []):
+            if u not in questions:
+                continue  # 上游未登记：归入 pending，不算 stale
+            seen_hash = c["consumed"].get(q, {}).get(u)
+            if seen_hash is not None and seen_hash != questions[u]["hash"]:
+                reasons.append(f"上游 {u} 结论已变更（{seen_hash[:8]} → {questions[u]['hash'][:8]}）")
+                if direct_root is None:
+                    direct_root = new_stale.get(u, {}).get("root", u)
+            if u in new_stale:
+                reasons.append(f"级联：上游 {u} 处于 stale")
+                if direct_root is None:
+                    direct_root = new_stale[u]["root"]
+        if reasons:
+            new_stale[q] = {"root": direct_root or q, "reasons": reasons, "marked_at": now()}
+    c["stale"] = new_stale
+
+
+def cmd_depend(args) -> dict:
+    root = args.root.resolve()
+    path = root / ".gates" / "conclusions.json"
+    c = load_json(path, default_conclusions())
+    deps = c["dependencies"]
+    ups = set(deps.get(args.question, []))
+    for u in args.on:
+        if u == args.question:
+            raise SystemExit(f"依赖不能自环：{u}")
+        ups.add(u)
+    deps[args.question] = sorted(ups)
+    # 环检测：拓扑访问后若同问重复出现即有环；拒绝该边，依赖图必须保持 DAG。
+    order = topo_order(deps, c["questions"])
+    if len(order) != len({q for q in c["questions"]} | set(deps)):
+        raise SystemExit("该依赖会构成环，已拒绝（跨问依赖必须为 DAG）")
+    sync_stale(c)
+    atomic_write_json(path, c)
+    append_log(root, {"event": "depend", "question": args.question, "on": deps[args.question]})
+    return {"command": "depend", "question": args.question, "depends_on": deps[args.question],
+            "stale": sorted(c["stale"]), "exit_code": 0}
+
+
+def cmd_record(args) -> dict:
+    root = args.root.resolve()
+    path = root / ".gates" / "conclusions.json"
+    c = load_json(path, default_conclusions())
+    q = args.question
+    if args.file:
+        h = hash_file(Path(args.file), root)
+    elif args.hash:
+        h = args.hash.strip()
+    else:
+        raise SystemExit("record 需要 --hash 或 --file 之一")
+
+    entry = c["questions"].get(q, {})
+    old = entry.get("hash")
+    history = entry.get("history", [])
+    changed = old is not None and old != h
+    if changed and args.cosmetic and not args.reason:
+        raise SystemExit("cosmetic 记录必须给 --reason 说明为何不触发传播")
+    entry.update({"hash": h, "recorded_at": now(), "history": history})
+
+    log_extra = {"event": "record", "question": q, "hash": h, "changed": changed, "cosmetic": bool(args.cosmetic)}
+    if changed:
+        history.append({"hash": old, "superseded_at": now()})
+        c["questions"][q] = entry
+        if args.cosmetic:
+            # 无语义变化：更新 hash 但不判定下游失效——直接下游的 consumed 快照跟进新 hash。
+            for d, ups in c["dependencies"].items():
+                if q in ups and d in c["consumed"] and q in c["consumed"].get(d, {}):
+                    c["consumed"][d][q] = h
+            log_extra["reason"] = args.reason
+        entry["history"] = history[-HISTORY_CAP:]
+    else:
+        c["questions"][q] = entry
+
+    sync_stale(c)
+    atomic_write_json(path, c)
+    append_log(root, log_extra)
+    return {"command": "record", "question": q, "hash": h, "changed": changed,
+            "cosmetic": bool(args.cosmetic), "stale": sorted(c["stale"]),
+            "stale_detail": c["stale"], "exit_code": 0}
+
+
+def cmd_consume(args) -> dict:
+    root = args.root.resolve()
+    path = root / ".gates" / "conclusions.json"
+    c = load_json(path, default_conclusions())
+    q = args.question
+    ups = c["dependencies"].get(q, [])
+    me = c["questions"].get(q)
+    if me is None:
+        raise SystemExit(f"{q} 尚未 record 自身结论，先重跑并 record 再 consume")
+    for u in ups:
+        if u not in c["questions"]:
+            raise SystemExit(f"上游 {u} 尚未登记结论，无法 consume")
+        # 时间戳守卫：本问结果必须晚于每个上游的最新更新，否则是拿旧结果消费新上游。
+        if me["recorded_at"] <= c["questions"][u]["recorded_at"]:
+            raise SystemExit(
+                f"{q} 的结果（{me['recorded_at']}）不晚于上游 {u} 的更新（{c['questions'][u]['recorded_at']}），"
+                "须先重跑并 record 新结果")
+    c["consumed"].setdefault(q, {})
+    for u in ups:
+        c["consumed"][q][u] = c["questions"][u]["hash"]
+    sync_stale(c)
+    atomic_write_json(path, c)
+    append_log(root, {"event": "consume", "question": q,
+                      "consumed": {u: c["questions"][u]["hash"] for u in ups}})
+    return {"command": "consume", "question": q,
+            "consumed": {u: c["questions"][u]["hash"][:8] for u in ups},
+            "stale": sorted(c["stale"]), "exit_code": 0}
+
+
+def cmd_check(args) -> dict:
+    root = args.root.resolve()
+    path = root / ".gates" / "conclusions.json"
+    c = load_json(path, default_conclusions())
+    sync_stale(c)
+    atomic_write_json(path, c)
+    questions, deps = c["questions"], c["dependencies"]
+    pending = [{"question": q, "missing_upstream": u}
+               for q, ups in deps.items() for u in ups if u not in questions]
+    not_consumed = [{"question": q, "upstream": u}
+                    for q, ups in deps.items() for u in ups
+                    if u in questions and u not in c["consumed"].get(q, {})]
+    append_log(root, {"event": "check", "stale": sorted(c["stale"])})
+    return {
+        "command": "check",
+        "stale": sorted(c["stale"]),
+        "stale_detail": {q: {"root": v["root"], "reasons": v["reasons"]} for q, v in c["stale"].items()},
+        "pending_dependencies": pending,
+        "not_yet_consumed": not_consumed,
+        "ok_questions": sorted(set(questions) - set(c["stale"])),
+        "exit_code": STALE_EXIT if c["stale"] else 0,
+    }
+
+
+def cmd_stale_status(args) -> dict:
+    c = load_json(args.root.resolve() / ".gates" / "conclusions.json", default_conclusions())
+    return {"command": "status", "questions": {q: v["hash"][:8] for q, v in c["questions"].items()},
+            "dependencies": c["dependencies"], "stale": c["stale"], "exit_code": 0}
+
+
+def cmd_reset(args) -> dict:
+    root = args.root.resolve()
+    out = {"command": "reset", "scope": args.scope}
+    if args.scope in ("recovery", "all"):
+        p = root / ".gates" / "recovery.json"
+        if p.exists():
+            p.unlink()
+        out["recovery"] = "cleared"
+    if args.scope in ("stale", "all"):
+        p = root / ".gates" / "conclusions.json"
+        if p.exists():
+            p.unlink()
+        out["conclusions"] = "cleared"
+    append_log(root, {"event": "reset", "scope": args.scope, "note": args.note})
+    out["exit_code"] = 0
+    return out
+
+
+def main(argv=None) -> int:
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    parser = argparse.ArgumentParser(prog="gates.py", description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    def add(name, **kw):
+        p = sub.add_parser(name, **kw)
+        p.add_argument("--root", default=".", help="项目根目录（状态存于 <root>/.gates/）")
+        return p
+
+    p = add("fail", help="记录一次失败轮次并给出恢复裁决")
+    p.add_argument("--class", dest="cls", required=True, choices=FAILURE_CLASSES)
+    p.add_argument("--error", required=True)
+    p.add_argument("--progress", action="append", metavar="KEY=VALUE",
+                   help="进展证据，规范键：%s" % ",".join(CANONICAL_KEYS))
+    p.set_defaults(func=cmd_fail)
+
+    p = add("resume", help="人工干预后复位恢复状态（必须留痕）")
+    p.add_argument("--note", required=True, help="干预内容，写入台账")
+    p.set_defaults(func=cmd_resume)
+
+    p = add("recover-status", help="查看恢复状态")
+    p.set_defaults(func=cmd_recover_status)
+
+    p = add("depend", help="声明跨问依赖（DAG）")
+    p.add_argument("--question", required=True)
+    p.add_argument("--on", action="append", required=True, help="上游小问，可多次")
+    p.set_defaults(func=cmd_depend)
+
+    p = add("record", help="登记某问结论 hash；hash 变更自动向下游传播 stale")
+    p.add_argument("--question", required=True)
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--hash")
+    g.add_argument("--file", help="用产物文件计算 hash（路径编入摘要）")
+    p.add_argument("--cosmetic", action="store_true", help="无语义变化，不触发传播")
+    p.add_argument("--reason", help="cosmetic 时的理由")
+    p.set_defaults(func=cmd_record)
+
+    p = add("consume", help="本问重跑完成后声明已基于最新上游（清自身 stale）")
+    p.add_argument("--question", required=True)
+    p.set_defaults(func=cmd_consume)
+
+    p = add("check", help="全量重算 stale；有 stale 时退出码 2")
+    p.set_defaults(func=cmd_check)
+
+    p = add("stale-status", help="查看结论 hash、依赖图与 stale 集")
+    p.set_defaults(func=cmd_stale_status)
+
+    p = add("reset", help="清空状态（新题目初始化时用）")
+    p.add_argument("--scope", choices=["recovery", "stale", "all"], default="all")
+    p.add_argument("--note", default="")
+    p.set_defaults(func=cmd_reset)
+
+    args = parser.parse_args(argv)
+    result = args.func(args)
+    code = result.get("exit_code", 0)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

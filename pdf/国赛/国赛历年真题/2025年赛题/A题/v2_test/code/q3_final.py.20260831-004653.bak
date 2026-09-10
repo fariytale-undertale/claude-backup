@@ -1,0 +1,172 @@
+# -*- coding: utf-8 -*-
+"""问题3 定向精修（q3.py 之后的收尾轮）：
+1. 修罚函数符号：目标 = -(并集) - 罚，不再用 10+|d| 分支（NM 需区分零时长可行与罚区）
+2. v 边界硬裁剪在最终复算时执行（罚系数提高防游出）
+3. 起点 = 结构化解（θ=180/v=110 三峰）+ 当前 NM 最优（179.61/140）等 4 个
+4. 精确复算 + G2 互证 + 重写 result1.xlsx / q3_results.csv
+"""
+import sys, os, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import numpy as np
+from scipy.optimize import minimize
+from core import (burst_pos, T_HIT, CYL_PTS, shaded_intervals,
+                  union_length, grid_union_length, V_UAV_MIN, V_UAV_MAX,
+                  G, UAVS, missile_pos, DT_MIN, SINK, T_EFF, CENTER_PT)
+import pandas as pd
+
+t0 = time.time()
+t_hit = T_HIT['M1']
+P0 = UAVS['FY1']
+
+
+def intervals_for(theta, v, td, tau, grid_dt=0.005):
+    if td < 0 or tau <= 0:
+        return []
+    B = burst_pos('FY1', td, tau, theta, v)
+    if B[2] < 0:
+        return []
+    return shaded_intervals(B, td + tau, 'M1', CYL_PTS, t_hit, grid_dt=grid_dt)
+
+
+def eval3(theta, v, params, grid_dt=0.005):
+    """目标 = -(并集) - 罚。罚: 间隔<1s、v 越界、tau<=0、td<0、z_B<0。"""
+    ps = sorted([(td, tau) for td, tau in params])
+    pen = 0.0
+    for i in range(2):
+        gap = ps[i + 1][0] - ps[i][0]
+        if gap < DT_MIN:
+            pen += 500.0 * (DT_MIN - gap) ** 2 + 0.5
+    if v < V_UAV_MIN or v > V_UAV_MAX:
+        pen += 500.0 * max(V_UAV_MIN - v, v - V_UAV_MAX, 0) ** 2 + 0.5
+    for td, tau in ps:
+        if tau <= 0:
+            pen += 1.0 + (-tau) ** 2
+        if td < 0:
+            pen += 1.0 + (-td) ** 2
+        zB = 1800.0 - 0.5 * G * tau ** 2
+        if zB < 0:
+            pen += 1.0 + (-zB) ** 2 * 0.01
+    ivs = [intervals_for(theta, v, td, tau, grid_dt) for td, tau in ps]
+    return -union_length([iv for e in ivs for iv in e]) - pen
+
+
+def struct_td(th, v, t_b):
+    M = missile_pos('M1', float(t_b))
+    u = np.array([np.cos(th), np.sin(th)])
+    B_h = P0[:2] + v * t_b * u
+    A = (CENTER_PT[:2] - M[:2]).reshape(2, 1)
+    s = float(np.linalg.lstsq(A, B_h - M[:2], rcond=None)[0][0])
+    if not (0.0 <= s <= 1.2):
+        return None
+    z_line = M[2] + s * (CENTER_PT[2] - M[2])
+    tau2 = 2.0 * (1800.0 - z_line) / G
+    if tau2 <= 0:
+        return None
+    tau = np.sqrt(tau2)
+    td = t_b - tau
+    if td < 0:
+        return None
+    return td, tau, s
+
+
+# ---- 起点（4 个，全部验证合法性）----
+start_specs = []
+for th_deg, v_s, tbs3 in [(180.0, 110.0, (5.5, 7.0, 8.5)),
+                          (180.0, 90.0, (5.0, 7.0, 9.0)),
+                          (179.0, 120.0, (5.5, 7.0, 8.5)),
+                          (179.6121, 140.0, (4.9139, 6.7159, 10.5418))]:
+    parts, ok = [], True
+    for tb in tbs3:
+        r = struct_td(np.radians(th_deg), v_s, tb)
+        if r is None:
+            ok = False
+            break
+        td, tau, _ = r
+        parts += [td, tau]
+    if ok:
+        x0 = np.array([np.radians(th_deg), v_s] + parts)
+        val0 = eval3(x0[0], x0[1], [(x0[2 + 2 * i], x0[3 + 2 * i]) for i in range(3)], 0.02)
+        start_specs.append((th_deg, v_s, x0, -val0))
+        print(f"[起点] th={th_deg} v={v_s} 初值时长 {-val0:.4f}s "
+              f"td={[round(x0[2+2*i],3) for i in range(3)]}")
+    else:
+        print(f"[起点] th={th_deg} v={v_s} struct_td 不可行，跳过")
+
+# ---- NM 精修 ----
+best = None
+for th_deg, v_s, x0, d0 in start_specs:
+    res = minimize(eval3, x0, args=(), method='Nelder-Mead',
+                   options={'maxfev': 1200, 'xatol': 1e-6, 'fatol': 1e-9})
+    th_r = res.x[0] % (2 * np.pi)
+    d = -eval3(th_r, res.x[1], [(res.x[2 + 2 * i], res.x[3 + 2 * i]) for i in range(3)],
+               0.005)
+    print(f"[NM th={th_deg}v={v_s}] -> {d:.4f}s @ th={np.degrees(th_r):.3f} "
+          f"v={res.x[1]:.3f} td={[round(res.x[2+2*i],3) for i in range(3)]} "
+          f"tau={[round(res.x[3+2*i],3) for i in range(3)]}")
+    if best is None or d > best[0]:
+        best = (d, res.x.copy())
+print(f"[精修] 最优 {best[0]:.4f}s，耗时 {time.time()-t0:.1f}s")
+
+# ---- 最终复算（v 硬裁剪到 [70,140]）----
+xb = best[1]
+theta_f = xb[0] % (2 * np.pi)
+v_f = float(np.clip(xb[1], V_UAV_MIN, V_UAV_MAX))
+params_f = sorted([(xb[2 + 2 * i], xb[3 + 2 * i]) for i in range(3)])
+ivs_per = [intervals_for(theta_f, v_f, td, tau, grid_dt=0.002) for td, tau in params_f]
+dur_final = union_length([iv for e in ivs_per for iv in e])
+per_durs = [union_length(e) for e in ivs_per]
+bursts = [(burst_pos('FY1', td, tau, theta_f, v_f), td + tau) for td, tau in params_f]
+dur_grid_check, _ = grid_union_length(bursts, 'M1', CYL_PTS, t_hit, dt=0.0005)
+
+print(f"\n[最终解] theta={np.degrees(theta_f)%360:.4f}° v={v_f:.4f}")
+for i, (td, tau) in enumerate(params_f):
+    B = burst_pos('FY1', td, tau, theta_f, v_f)
+    D = P0 + v_f * td * np.array([np.cos(theta_f), np.sin(theta_f), 0.0])
+    print(f"  弹{i+1}: t_d={td:.4f} tau={tau:.4f} t_b={td+tau:.4f} "
+          f"D=({D[0]:.2f},{D[1]:.2f},1800) B=({B[0]:.2f},{B[1]:.2f},{B[2]:.2f}) "
+          f"单独时长={per_durs[i]:.4f}")
+print(f"[最终解] 并集 = {dur_final:.4f}s (逐弹和 {sum(per_durs):.4f}, "
+      f"重叠 {sum(per_durs)-dur_final:.4f})")
+print(f"[G2互证] 网格 {dur_grid_check:.4f}  |差| {abs(dur_final-dur_grid_check):.2e}")
+assert abs(dur_final - dur_grid_check) < 8e-4
+gaps = [params_f[i+1][0] - params_f[i][0] for i in range(2)]
+flags = []
+if abs(v_f - V_UAV_MIN) < 0.5 or abs(v_f - V_UAV_MAX) < 0.5:
+    flags.append(f'v={v_f:.2f} 卡边界')
+for i, g in enumerate(gaps):
+    if abs(g - DT_MIN) < 0.05:
+        flags.append(f'间隔{i+1}卡1s(gap={g:.3f})')
+print(f"[G5] {'; '.join(flags) if flags else '无卡边界'}; 间隔 {[round(g,3) for g in gaps]}")
+print(f"[P5] 云团最低 z = {min(b[2] - SINK*(min(tb+T_EFF,t_hit)-tb) for b, tb in bursts):.1f} m")
+print(f"[上界对比] 结构化扫描上界 7.127s vs 解 {dur_final:.4f}s -> "
+      f"间隙 {100*(7.127-dur_final)/7.127:.1f}%")
+
+# ---- 写 result1.xlsx + q3_results.csv（覆盖 q3.py 旧版）----
+out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'output')
+tab_dir = os.path.join(out_dir, 'tables')
+rows = []
+for i, (td, tau) in enumerate(params_f):
+    B = burst_pos('FY1', td, tau, theta_f, v_f)
+    D = P0 + v_f * td * np.array([np.cos(theta_f), np.sin(theta_f), 0.0])
+    rows.append([np.degrees(theta_f) % 360, v_f, i + 1,
+                 D[0], D[1], D[2], B[0], B[1], B[2], per_durs[i]])
+pd.DataFrame(rows, columns=['无人机运动方向', '无人机运动速度 (m/s)', '烟幕干扰弹编号',
+                            '烟幕干扰弹投放点的x坐标 (m)', '烟幕干扰弹投放点的y坐标 (m)',
+                            '烟幕干扰弹投放点的z坐标 (m)', '烟幕干扰弹起爆点的x坐标 (m)',
+                            '烟幕干扰弹起爆点的y坐标 (m)', '烟幕干扰弹起爆点的z坐标 (m)',
+                            '有效干扰时长 (s)']).to_excel(
+    os.path.join(out_dir, 'result1.xlsx'), index=False)
+pd.DataFrame([
+    ['航向角 theta (deg)', f'{np.degrees(theta_f)%360:.4f}'],
+    ['速度 v (m/s)', f'{v_f:.4f}'],
+    ['弹1 (t_d, tau)', f'({params_f[0][0]:.4f}, {params_f[0][1]:.4f})'],
+    ['弹2 (t_d, tau)', f'({params_f[1][0]:.4f}, {params_f[1][1]:.4f})'],
+    ['弹3 (t_d, tau)', f'({params_f[2][0]:.4f}, {params_f[2][1]:.4f})'],
+    ['并集遮蔽时长 (s)', f'{dur_final:.4f}'],
+    ['逐弹时长 (s)', f'{[round(d,4) for d in per_durs]}'],
+    ['G2网格互证 (s)', f'{dur_grid_check:.4f}'],
+    ['结构上界 (s)', '7.127'],
+], columns=['量', '值']).to_csv(os.path.join(tab_dir, 'q3_results.csv'), index=False,
+                               encoding='utf-8-sig')
+print("  [表] result1.xlsx / q3_results.csv 已更新")
+print(f"总耗时 {time.time()-t0:.1f}s")

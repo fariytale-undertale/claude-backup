@@ -1,0 +1,170 @@
+# -*- coding: utf-8 -*-
+"""问题三：分带变尺寸/变高度行网格优化
+6 个 y 向分带，每带独立 (w_b, h_b)，z0_b = max(2, h_b/2+0.05)；
+带内 pitch=w_b+5、行距 0.86610*pitch（半 pitch 错排），带间过渡行距 = max(w)+5。
+目标（字典序）：E>=60 MW 下最大化 u。用法：python q3_solve.py solve|final
+"""
+import json
+import sys
+import time
+
+import numpy as np
+
+import engine as eg
+import figs as fg
+
+ROOT = r"D:/z_data/.zcode/workspace/default/2023A"
+STATE = f"{ROOT}/output/q3_state.json"
+RATED = 60.0
+CUTS = [-350.0, -200.0, -80.0, 40.0, 160.0, 280.0, 350.01]  # 6 带
+TY = -60.41
+
+
+def load():
+    with open(STATE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save(s):
+    with open(STATE, "w", encoding="utf-8") as f:
+        json.dump(s, f, ensure_ascii=False)
+
+
+def eval_bands(bands, ty=TY, K=12, want_detail=False):
+    bands = [(max(2.2, min(7.5, w)), max(2.0, min(w, h))) for (w, h) in bands]
+    mxy, wh = eg.layout_rows_banded((0.0, ty), bands, CUTS)
+    if mxy is None or len(mxy) < 10:
+        return None
+    z0 = np.maximum(2.0, wh[:, 1] / 2 + 0.05)
+    res = eg.evaluate_field(mxy, z0, wh[:, 0].copy(), wh[:, 1].copy(), (0.0, ty),
+                            K=K, QN=64, cutoff=50.0)
+    E = float(res["df"]["E_kW"].mean()) / 1000.0
+    A = res["A_total"]
+    u = float(res["df"]["E_kW"].mean()) / A
+    rec = dict(bands=[[round(w, 4), round(h, 4)] for (w, h) in bands], ty=ty,
+               n=int(len(mxy)), A=round(A, 1), E=round(E, 4), u=round(u, 6),
+               feasible=bool(E >= RATED))
+    if want_detail:
+        rec["res"] = res
+        rec["mxy"] = mxy
+        rec["wh"] = wh
+        rec["z0"] = z0
+    return rec
+
+
+def lex_key(r):
+    return (0 if r["feasible"] else 1, -r["u"] if r["feasible"] else -r["E"])
+
+
+def main(stage):
+    if stage == "solve":
+        bands = [[5.854, 5.667]] * 6
+        best = eval_bands(bands)
+        print(f"init: u={best['u']:.5f} E={best['E']:.3f} N={best['n']} feas={best['feasible']}")
+        trace = [dict(i=0, u=best["u"], E=best["E"], bands=best["bands"], acc=True)]
+        ei = 0
+        t0 = time.time()
+        for sweep, stepset in enumerate([(0.6, 0.3), (0.3, 0.15), (0.15, 0.075)]):
+            for b in range(6):
+                for dw, dh in [(stepset[0], 0), (-stepset[0], 0), (0, stepset[0]), (0, -stepset[0]),
+                               (stepset[1], 0), (-stepset[1], 0), (0, stepset[1]), (0, -stepset[1])]:
+                    cand = [list(x) for x in best["bands"]]
+                    cand[b][0] += dw
+                    cand[b][1] += dh
+                    cand[b][1] = min(cand[b][1], cand[b][0])
+                    ei += 1
+                    r = eval_bands(cand)
+                    acc = bool(r and lex_key(r) < lex_key(best))
+                    if acc:
+                        best = r
+                    trace.append(dict(i=ei, u=r["u"] if r else None, E=r["E"] if r else None,
+                                      bands=r["bands"] if r else None, acc=acc))
+            print(f"sweep {sweep}: best u={best['u']:.5f} E={best['E']:.3f} ({time.time()-t0:.0f}s)")
+        # 塔位微调
+        for dty in (-20.0, -10.0, 10.0, 20.0):
+            ei += 1
+            r = eval_bands([list(x) for x in best["bands"]], ty=TY + dty)
+            acc = bool(r and lex_key(r) < lex_key(best))
+            if acc:
+                best = r
+            trace.append(dict(i=ei, u=r["u"] if r else None, E=r["E"] if r else None,
+                              bands=r["bands"] if r else None, ty=r["ty"] if r else None, acc=acc))
+        s = dict(best={k: v for k, v in best.items() if k not in ("res", "mxy", "wh", "z0")},
+                 trace=trace)
+        save(s)
+        print(f"solve done {ei} evals: u={best['u']:.5f} E={best['E']:.3f} N={best['n']}")
+        print(f"bands={best['bands']} ty={best['ty']}")
+
+    elif stage == "final":
+        s = load()
+        best = s["best"]
+        r24 = eval_bands([list(x) for x in best["bands"]], ty=best["ty"], K=24, want_detail=True)
+        print(f"K=24: u={r24['u']:.5f} E={r24['E']:.3f} N={r24['n']} A={r24['A']:.0f}")
+        tries = 0
+        while (not r24["feasible"]) or (r24["E"] < RATED + 0.4 and tries < 8):
+            bands = [list(x) for x in r24["bands"]]
+            for b in range(len(bands)):
+                bands[b][1] = min(bands[b][0], bands[b][1] + 0.05)
+            tries += 1
+            r24 = eval_bands(bands, ty=r24["ty"], K=24, want_detail=True)
+            print(f"  margin x{tries}: E={r24['E']:.3f} u={r24['u']:.5f}")
+            if r24["E"] >= RATED + 0.4:
+                break
+        res = r24["res"]; mxy = r24["mxy"]; wh = r24["wh"]; z0 = r24["z0"]
+        df = res["df"]; A = r24["A"]
+        eta_m = res["eta_mirror_TN"].mean(axis=0)
+        print(f"FINAL Q3: ty={r24['ty']} N={r24['n']} A={A:.1f} E={r24['E']:.4f} u={r24['u']:.6f}")
+        print(f"bands={r24['bands']}")
+        print(f"  eta={df['eta'].mean():.5f} cos={df['eta_cos'].mean():.5f} "
+              f"sb={df['eta_sb'].mean():.5f} tr={df['eta_tr'].mean():.5f}")
+        print(f"  per-mirror eta: min={eta_m.min():.4f} p10={np.percentile(eta_m,10):.4f} "
+              f"mean={eta_m.mean():.4f}")
+        # 每对相邻镜间距 vs max(w_i,w_j)+5
+        from scipy.spatial import cKDTree
+        tree = cKDTree(mxy)
+        dnn, inn = tree.query(mxy, k=2)
+        req = np.maximum(wh[:, 0], wh[inn[:, 1], 0]) + 5.0
+        viol = dnn[:, 1] < req - 1e-9
+        print(f"  spacing check: max violation={float((req - dnn[:,1]).max()):.6f} "
+              f"(<=0 合法), n_viol={int(viol.sum())}")
+        print(f"  r_max={np.hypot(mxy[:,0],mxy[:,1]).max():.2f} "
+              f"d_tower_min={np.hypot(mxy[:,0],mxy[:,1]-r24['ty']).min():.2f} "
+              f"z0 range=[{z0.min():.3f},{z0.max():.3f}] w range=[{wh[:,0].min():.3f},{wh[:,0].max():.3f}]")
+        np.save(f"{ROOT}/data/q3_mirrors.npy", mxy)
+        np.save(f"{ROOT}/data/q3_wh.npy", wh)
+        np.save(f"{ROOT}/data/q3_z0.npy", z0)
+        mon = df.groupby("month_idx", as_index=False).agg(
+            eta_cos=("eta_cos", "mean"), eta_sb=("eta_sb", "mean"),
+            eta_tr=("eta_tr", "mean"), eta=("eta", "mean"), E_kW=("E_kW", "mean"))
+        mon["unit"] = mon["E_kW"] / A
+        fg.plot_layout(mxy, eta_m, (0.0, r24["ty"]), "q3_layout_eta.png",
+                       "问题三优化布局及逐镜年平均光学效率", sizes=12)
+        fg.plot_components(mon, "q3_components_month.png", "问题三 逐月平均效率分量")
+        fg.plot_power(df, "q3_power_time.png", "问题三 定日镜场输出热功率")
+        sunv, _, _, _ = eg.build_times()
+        i0 = int(np.argmin(np.abs(np.hypot(mxy[:, 0] - 150, mxy[:, 1] - r24["ty"] + 100))))
+        fg.scene_3d(mxy, z0, (0.0, r24["ty"]), sunv[2 * 5 + 1], "scene_3d_q3.png",
+                    sample_idx=i0, label="（问题三）")
+        tr = s.get("trace", [])
+        if tr:
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(figsize=(7.0, 3.8))
+            xs = [t["i"] for t in tr]
+            ax.plot(xs, [t["u"] if t["u"] else np.nan for t in tr], ".", ms=2.5,
+                    color="lightsteelblue", label="全部评估点")
+            acc = [t for t in tr if t.get("acc")]
+            ax.plot([t["i"] for t in acc], [t["u"] for t in acc], "o", ms=4,
+                    color="crimson", label="当前最优更新")
+            ax.set_xlabel("累计评估次数"); ax.set_ylabel("单位面积年平均输出热功率 (kW/m²)")
+            ax.set_title("问题三 分带尺寸精化收敛轨迹（约束 E≥60 MW）")
+            ax.grid(alpha=0.3, ls=":"); ax.legend()
+            fg.save(fig, "q3_convergence.png")
+        mon.to_csv(f"{ROOT}/output/tables/q3_monthly.csv", index=False)
+        s["final"] = dict(bands=r24["bands"], ty=r24["ty"], n=r24["n"], A=r24["A"],
+                          E=r24["E"], u=r24["u"], feas=r24["feasible"])
+        save(s)
+        print("saved q3 mirrors/wh/z0 npy, monthly csv, figures")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1] if len(sys.argv) > 1 else "solve")

@@ -1,0 +1,156 @@
+# -*- coding: utf-8 -*-
+"""区分性测试（判据实现后、主求解前）：
+T1 直线退化 | T2 圆周退化（曲线路径+速度递推） | T3 速度递推 vs 有限差分
+T4 双判据区分案例（矩形 vs 中心线，含独立采样法裁决） | T5 SAT/线段距离单元案例
+T6 theta_of_s 往返恒等 | T7 手性镜像
+断言全部通过才允许进入主求解。"""
+import numpy as np
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dragon_core import (LinePath, CirclePath, Spiral, walk_chain, chain_speeds,
+                         chain_points, chord_residual, bench_rects, bench_centerlines,
+                         _seg_seg_dist, _sat_overlap, S_arc, theta_of_s, spiral_point,
+                         CHORDS, PAIRS, min_bench_distance, min_centerline_distance)
+
+ok = True
+def check(name, cond, detail=""):
+    global ok
+    status = "PASS" if cond else "FAIL"
+    if not cond:
+        ok = False
+    print(f"[{status}] {name} {detail}")
+
+# ---- T1 直线退化 ----
+lp = LinePath([0, 0], [1, 0])
+mu = walk_chain(lp, 100.0)
+X = chain_points(lp, mu)[0]
+sd = chain_speeds(lp, mu, -1.0)
+res = chord_residual(lp, mu)
+check("T1 直线弦长残差", res < 1e-9, f"max|d-c|={res:.2e}")
+check("T1 直线速度全为1", np.max(np.abs(np.abs(sd) - 1)) < 1e-9,
+      f"max|v-1|={np.max(np.abs(np.abs(sd)-1)):.2e}")
+check("T1 位置严格等距", np.max(np.abs(-np.diff(mu[0]) - CHORDS)) < 1e-9)
+
+# ---- T2 圆周退化 ----
+cp = CirclePath([0, 0], 5.0)
+mu2 = walk_chain(cp, 10.0)
+res2 = chord_residual(cp, mu2)
+sd2 = chain_speeds(cp, mu2, 1.0)
+check("T2 圆周弦长残差", res2 < 1e-9, f"max|d-c|={res2:.2e}")
+check("T2 圆周速度全为1(刚体旋转)", np.max(np.abs(np.abs(sd2) - 1)) < 1e-8,
+      f"max|v-1|={np.max(np.abs(np.abs(sd2)-1)):.2e}")
+
+# ---- T3 速度递推 vs 中心差分（盘入螺线 t=300 深处） ----
+# 盘入时行进方向 = s 减小，用 ReversedPath 包装（mu=-s 沿行进方向递增）
+from dragon_core import ReversedPath
+sp = Spiral(0.55)
+rp = ReversedPath(sp)
+S_A = float(S_arc(32 * np.pi, sp.b))
+t0 = 300.0
+mu3 = walk_chain(rp, t0 - S_A)          # 头部 mu = t - S_A = -(S_A - t)
+sd3 = chain_speeds(rp, mu3, 1.0)
+res3 = chord_residual(rp, mu3)
+check("T3 螺线弦长残差", res3 < 1e-9, f"max|d-c|={res3:.2e}")
+h = 1e-5
+Xp = chain_points(rp, walk_chain(rp, t0 - S_A + h))[0]
+Xm = chain_points(rp, walk_chain(rp, t0 - S_A - h))[0]
+v_fd = np.linalg.norm(Xp - Xm, axis=1) / (2 * h)
+rel = np.abs(np.abs(sd3[0]) - v_fd) / v_fd
+check("T3 递推vs差分(t=300)", rel.max() < 1e-6, f"max rel err={rel.max():.2e}")
+print("    把手 0/1/50/150/223 速度:",
+      np.round(np.abs(sd3[0])[[0, 1, 50, 150, 223]], 6))
+
+# ---- T4 双判据区分案例（板凳0 vs 板凳4 直接对测，避免填充链干扰） ----
+# 板凳0：把手 (0,0)-(2.86,0)；板凳4：把手 (3.30,-1.0)-(3.30,0.65)（垂直，位于其端部右侧）
+# 预期：矩形距离 = 0.015（不碰），中心线判据 0.165-0.30 = -0.135 <0（判碰）→ 结论相反
+P = np.zeros((224, 2))
+P[0] = [0, 0]; P[1] = [2.86, 0]
+P[4] = [3.30, -1.0]; P[5] = [3.30, 0.65]
+for k in range(224):
+    if np.allclose(P[k], 0):
+        P[k] = [100 + 1.65 * k, 300]     # 其余把手放远处（构成合法非零段，避开测试区）
+P[0] = [0, 0]; P[1] = [2.86, 0]; P[4] = [3.30, -1.0]; P[5] = [3.30, 0.65]
+
+def pair_rect_dist(P, i, j):
+    R = bench_rects(P)
+    C1, C2 = R[i:i + 1], R[j:j + 1]
+    if bool(_sat_overlap(C1, C2)[0]):
+        return 0.0
+    best = np.inf
+    for a in range(4):
+        for b in range(4):
+            dd = _seg_seg_dist(C1[:, a], C1[:, (a + 1) % 4],
+                               C2[:, b], C2[:, (b + 1) % 4])
+            best = min(best, float(dd[0]))
+    return best
+
+def pair_centerline_dist(P, i, j):
+    S = bench_centerlines(P)
+    p1, p2 = S[i, 0], S[i, 1]
+    q1, q2 = S[j, 0], S[j, 1]
+    return float(_seg_seg_dist(p1[None], p2[None], q1[None], q2[None])[0])
+
+d_rect = pair_rect_dist(P, 0, 4)
+d_cl = pair_centerline_dist(P, 0, 4)
+print(f"    T4 构造案例(板凳0 vs 板凳4): 矩形距离={d_rect:.4f} | "
+      f"中心线距离={d_cl:.4f} (判据余量 {d_cl-0.30:+.4f})")
+check("T4 两判据结论分叉", (d_rect > 0.001) and (d_cl < 0.30),
+      "矩形判不碰 vs 中心线判碰")
+# 独立裁决：边界稠密采样
+def sampled_rect_dist(P, i, j, n=1500):
+    R = bench_rects(P)
+    def perim(C):
+        return np.concatenate([np.linspace(C[k], C[(k + 1) % 4], n) for k in range(4)])
+    A = perim(R[i]); B = perim(R[j])
+    return np.sqrt(((A[:, None, :] - B[None, :, :]) ** 2).sum(-1)).min()
+d_sample = sampled_rect_dist(P, 0, 4)
+check("T4 闭式矩形距离 vs 采样法", abs(d_rect - d_sample) < 2e-3,
+      f"闭式={d_rect:.4f} 采样={d_sample:.4f}")
+check("T4 物理正确者为矩形判据", d_rect > 0)
+
+# ---- T5 SAT / 线段距离单元案例 ----
+r1 = np.array([[[-1, -1], [1, -1], [1, 1], [-1, 1]]], float)
+r2a = np.array([[[0.5, 0.5], [2, 0.5], [2, 2], [0.5, 2]]], float)   # 重叠
+r2b = np.array([[[1.05, -1], [2, -1], [2, 1], [1.05, 1]]], float)   # 间隙0.05
+check("T5 SAT 重叠→0", bool(_sat_overlap(r1, r2a)[0]))
+check("T5 SAT 分离→不重叠", not bool(_sat_overlap(r1, r2b)[0]))
+d5 = _seg_seg_dist(np.array([[0., 0.]]), np.array([[2., 0.]]),
+                   np.array([[3., -1.]]), np.array([[3., 1.]]))[0]
+check("T5 线段距离=1", abs(d5 - 1.0) < 1e-12, f"d={d5}")
+d5b = _seg_seg_dist(np.array([[0., 0.]]), np.array([[2., 0.]]),
+                    np.array([[1., 1.]]), np.array([[1., 3.]]))[0]
+check("T5 垂直端触距离=1", abs(d5b - 1.0) < 1e-12, f"d={d5b}")
+
+# ---- T6 theta_of_s 往返 ----
+errs = []
+for s in [0.0, 1.0, 37.96, 142.59, 442.59, 800.0, 1500.0]:
+    b = 0.55 / (2 * np.pi)
+    th = float(theta_of_s(np.array([s]), b)[0])
+    errs.append(abs(float(S_arc(np.array([th]), b)[0]) - s))
+check("T6 S-theta 往返恒等", max(errs) < 1e-10, f"max err={max(errs):.2e}")
+
+# ---- T7 手性镜像 ----
+b = 0.55 / (2 * np.pi)
+pt = spiral_point(np.array([32 * np.pi + 0.3]), b)[0]
+check("T7 螺线顺时针盘入（第2点 y>0，位于 x 轴上方）", pt[1] > 0, f"P={np.round(pt,4)}")
+
+# ---- T8 批量 SAT 回归（多对不同已知状态混合，防批处理错位 bug） ----
+def sq(x0, y0):
+    return np.array([[[x0, y0], [x0 + 1, y0], [x0 + 1, y0 + 1], [x0, y0 + 1]]], float)
+A1 = np.concatenate([sq(0, 0), sq(0, 0), sq(0, 0)], axis=0)
+B1 = np.concatenate([sq(0.5, 0.5), sq(2, 0), sq(1.05, 0)], axis=0)  # 重叠/远/间隙0.05
+ov8 = _sat_overlap(A1, B1)
+check("T8 批量SAT状态[重叠,分离,间隙]", ov8.tolist() == [True, False, False], str(ov8.tolist()))
+
+# ---- T9 标量快速路径 vs 向量化路径逐位一致 ----
+mu_vec = walk_chain(rp, np.array([t0 - S_A]))       # 向量化（M=1 也走向量化分支）
+mu_fas = walk_chain(rp, float(t0 - S_A))            # 标量快速分支
+check("T9 标量vs向量化 walk 逐位一致", np.array_equal(mu_vec, mu_fas),
+      f"max|diff|={np.max(np.abs(mu_vec-mu_fas)):.2e}")
+sp2 = Spiral(0.55)
+check("T9 point_fast 与 point 一致",
+      np.max(np.abs(sp2.point_fast(142.590256) - sp2.point(np.array([142.590256]))[0])) < 1e-12)
+
+print()
+print("区分性测试总结:", "ALL PASS" if ok else "HAS FAILURES")
+sys.exit(0 if ok else 1)

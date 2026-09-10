@@ -1,0 +1,12 @@
+# -*- coding: utf-8 -*-
+"""main.tex：摘要页改为 大标题 + 居中「摘要」标题 + 正文直排（示例格式）"""
+import io
+
+p = r"D:/z_data/.zcode/workspace/default/2023A/paper/main.tex"
+s = io.open(p, encoding="utf-8").read()
+old = "\\section*{定日镜场的优化设计}\n{\\bfseries 摘\\quad 要：}"
+new = "\\section*{定日镜场的优化设计}\n\\section*{摘要}\n"
+assert old in s, "abstract head not found"
+s = s.replace(old, new, 1)
+io.open(p, "w", encoding="utf-8").write(s)
+print("abstract head restructured")

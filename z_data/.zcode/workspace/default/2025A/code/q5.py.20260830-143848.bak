@@ -1,0 +1,285 @@
+# -*- coding: utf-8 -*-
+"""问题5：5 架无人机各至多 3 弹，干扰 M1/M2/M3，最大化三导弹有效遮蔽时长之和。
+流程：能力矩阵（15 对 机×导弹 粗扫+NM，缓存）→ 全局贪心指派（容量≤3/机，边际增益门槛）
+→ 窄网格精定位 → 逐机坐标上升（共享 θ,v，全局目标）→ 独立验证。"""
+import numpy as np
+import time
+import pickle
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import (UAVS, MISSILES, target_samples, T_FUSE_MIN, T_END,
+                    shading_intervals, union_length, burst_point)
+from solver import tau_of, nelder_mead
+import plotstyle as ps
+ps.set_figdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'output', 'figures'))
+import matplotlib.pyplot as plt
+
+T0 = time.time()
+SAMPLES = target_samples()
+SAMPLES_V = target_samples(48, 4)
+UAV_NAMES = ['FY1', 'FY2', 'FY3', 'FY4', 'FY5']
+MIS_NAMES = ['M1', 'M2', 'M3']
+
+def intervals_of(uav, hd, sp, td, tf, mis, dt=0.05, samples=SAMPLES):
+    iv, _, _ = shading_intervals(uav, hd, sp, td, tf, mis, dt, samples, 'body')
+    return iv
+
+# ================= 阶段A：能力矩阵（15 对）=================
+tA = time.time()
+cache5 = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'q5_matrix_cache.pkl')
+if os.path.exists(cache5):
+    with open(cache5, 'rb') as f:
+        matrix = pickle.load(f)
+    print(f"[阶段A 能力矩阵] 复用缓存 {len(matrix)} 对")
+else:
+    matrix = {}
+    for uav in UAV_NAMES:
+        u0 = UAVS[uav]
+        for mis in MIS_NAMES:
+            cells = []
+            for hd in np.arange(0.0, 360.0, 15.0):
+                for sp in (70.0, 105.0, 140.0):
+                    for td in (0.0, 4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0):
+                        for tf in (1.0, 2.0, 3.0, 4.5, 5.7, 7.0, 8.5, 10.4, 12.0, 14.0):
+                            tau = tau_of([(u0, hd, sp, td, tf)], mis, dt=0.1, samples=SAMPLES)
+                            cells.append((tau, hd, sp, td, tf))
+            cells.sort(key=lambda r: -r[0])
+            best = None
+            for tau0, hd, sp, td, tf in cells[:2]:
+                def neg(y, _u=u0, _m=mis):
+                    hdx = y[0] % 360.0
+                    spx = 70.0 + 70.0 / (1.0 + np.exp(-y[1]))
+                    tdx, tfx = y[2] ** 2, T_FUSE_MIN + y[3] ** 2
+                    return -tau_of([(_u, hdx, spx, tdx, tfx)], _m, dt=0.05, samples=SAMPLES)
+                y0 = np.array([hd, np.log(max(sp - 70, 1e-6) / max(140 - sp, 1e-6)),
+                               np.sqrt(max(td, 1e-4)), np.sqrt(max(tf - T_FUSE_MIN, 1e-4))])
+                xb, fb, _, _ = nelder_mead(neg, y0, max_iter=300)
+                if best is None or fb < best[1]:
+                    hdx, spx, tdx, tfx = xb[0] % 360.0, 70.0 + 70.0 / (1.0 + np.exp(-xb[1])), xb[2] ** 2, T_FUSE_MIN + xb[3] ** 2
+                    best = ((hdx, spx, tdx, tfx), fb)
+            matrix[(uav, mis)] = (-best[1], best[0])
+            print(f"  {uav}→{mis}: τ={-best[1]:.3f}s  hd={best[0][0]:.1f}° v={best[0][1]:.0f} td={best[0][2]:.2f} tf={best[0][3]:.2f}")
+    with open(cache5, 'wb') as f:
+        pickle.dump(matrix, f)
+t_mat = time.time() - tA
+print(f"[阶段A 能力矩阵] 耗时 {t_mat:.1f}s")
+
+# ================= 阶段B：全局贪心指派 =================
+tB = time.time()
+cands = sorted(((tau, p[0], p[1], p[2], p[3], uav, mis) for (uav, mis), (tau, p) in matrix.items()),
+               key=lambda r: -r[0])
+cap = {u: 3 for u in UAV_NAMES}
+per_mis_cnt = {m: 0 for m in MIS_NAMES}
+sol = {u: {'hd': None, 'sp': None, 'bombs': []} for u in UAV_NAMES}   # bombs: [td, tf, mis]
+mis_iv = {m: [] for m in MIS_NAMES}      # 已选弹对该导弹的区间
+n_commit = 0
+for tau0, hd, sp, td, tf, uav, mis in cands:
+    if cap[uav] <= 0 or per_mis_cnt[mis] >= 3:
+        continue
+    iv_new = intervals_of(UAVS[uav], hd, sp, td, tf, mis, dt=0.1)
+    gain = union_length(mis_iv[mis] + iv_new) - union_length(mis_iv[mis])
+    if gain >= 0.4:
+        if sol[uav]['hd'] is None:
+            sol[uav]['hd'], sol[uav]['sp'] = hd, sp
+        sol[uav]['bombs'].append([td, tf, mis])
+        mis_iv[mis] = mis_iv[mis] + iv_new
+        cap[uav] -= 1
+        per_mis_cnt[mis] += 1
+        n_commit += 1
+        print(f"  [指派] {uav}→{mis}: 边际增益 {gain:.2f}s（矩阵 τ={tau0:.2f}s）")
+t_greedy = time.time() - tB
+tot0 = sum(union_length(v) for v in mis_iv.values())
+print(f"[阶段B 贪心指派] {n_commit} 弹，初始总量 {tot0:.2f}s（耗时{t_greedy:.1f}s）")
+
+# ================= 阶段C：窄网格精定位 + 逐机坐标上升（共享 θ,v，全局目标）=================
+tC = time.time()
+def other_intervals(uav_name):
+    """除 uav_name 外所有已选弹对每导弹的区间缓存。"""
+    oc = {m: [] for m in MIS_NAMES}
+    for u, s in sol.items():
+        if u == uav_name:
+            continue
+        for td, tf, mis in s['bombs']:
+            oc[mis] += intervals_of(UAVS[u], s['hd'], s['sp'], td, tf, mis, dt=0.05)
+    return oc
+
+def total_with(uav_name, hd, sp, bombs, oc, dt=0.05):
+    tot = 0.0
+    for m in MIS_NAMES:
+        ivs = list(oc[m])
+        for td, tf, mis in bombs:
+            if mis == m:
+                ivs += intervals_of(UAVS[uav_name], hd, sp, td, tf, m, dt=dt)
+        tot += union_length(ivs)
+    return tot
+
+# 窄网格精定位（零平台逃逸）：对每个已选弹，在其参数邻域微调
+for u in UAV_NAMES:
+    s = sol[u]
+    if not s['bombs']:
+        continue
+    oc = other_intervals(u)
+    improved = list(s['bombs'])
+    for bi, (td, tf, mis) in enumerate(improved):
+        best_local = (None, -1)
+        for dhd in (-0.3, -0.15, -0.05, 0, 0.05, 0.15, 0.3):
+            for dtf in (-0.3, -0.15, 0, 0.15, 0.3):
+                for dtd in (-0.3, 0, 0.3):
+                    tdx, tfx = td + dtd, tf + dtf
+                    if tdx < 0 or tfx < T_FUSE_MIN:
+                        continue
+                    bombs_try = [b.copy() for b in improved]
+                    bombs_try[bi][0], bombs_try[bi][1] = tdx, tfx
+                    tot = total_with(u, s['hd'] + dhd, s['sp'], bombs_try, oc, dt=0.1)
+                    if tot > best_local[1]:
+                        best_local = ((s['hd'] + dhd, tdx, tfx), tot)
+        if best_local[0] is not None:
+            s['hd'], improved[bi][0], improved[bi][1] = best_local[0][0], best_local[0][1], best_local[0][2]
+    s['bombs'] = improved
+mis_iv = {m: [] for m in MIS_NAMES}
+for u in UAV_NAMES:
+    s = sol[u]
+    for td, tf, mis in s['bombs']:
+        mis_iv[mis] += intervals_of(UAVS[u], s['hd'], s['sp'], td, tf, mis, dt=0.05)
+tot_after_c1 = sum(union_length(v) for v in mis_iv.values())
+print(f"[阶段C1 窄网格精定位] 总量 {tot_after_c1:.2f}s")
+
+hist_track = [tot_after_c1]
+for sweep in range(2):
+    for u in UAV_NAMES:
+        if not sol[u]['bombs']:
+            continue
+        oc = other_intervals(u)
+        k = len(sol[u]['bombs'])
+        def neg_global(y, _u=u, _k=k, _oc=oc):
+            hdx = y[0] % 360.0
+            spx = 70.0 + 70.0 / (1.0 + np.exp(-y[1]))
+            tds = []
+            t_acc = y[2] ** 2
+            tds.append(t_acc)
+            for j in range(1, _k):
+                t_acc = t_acc + 1.0 + y[2 + j] ** 2
+                tds.append(t_acc)
+            bombs = [[tds[j], T_FUSE_MIN + y[2 + _k + j] ** 2, sol[_u]['bombs'][j][2]] for j in range(_k)]
+            return -total_with(_u, hdx, spx, bombs, _oc, dt=0.05)
+        y0 = [sol[u]['hd'], np.log(max(sol[u]['sp'] - 70, 1e-6) / max(140 - sol[u]['sp'], 1e-6)),
+              np.sqrt(max(sol[u]['bombs'][0][0], 1e-4))]
+        for j in range(1, k):
+            y0.append(np.sqrt(max(sol[u]['bombs'][j][0] - sol[u]['bombs'][j - 1][0] - 1.0, 1e-4)))
+        for j in range(k):
+            y0.append(np.sqrt(max(sol[u]['bombs'][j][1] - T_FUSE_MIN, 1e-4)))
+        step = 0.25 if sweep == 0 else 0.08
+        xb, fb, _, _ = nelder_mead(neg_global, np.array(y0), max_iter=300, step=step)
+        hdx = xb[0] % 360.0
+        spx = 70.0 + 70.0 / (1.0 + np.exp(-xb[1]))
+        tds = []
+        t_acc = xb[2] ** 2
+        tds.append(t_acc)
+        for j in range(1, k):
+            t_acc = t_acc + 1.0 + xb[2 + j] ** 2
+            tds.append(t_acc)
+        sol[u]['hd'], sol[u]['sp'] = hdx, spx
+        for j in range(k):
+            sol[u]['bombs'][j][0] = tds[j]
+            sol[u]['bombs'][j][1] = T_FUSE_MIN + xb[2 + k + j] ** 2
+        # 重算总体
+        mis_iv = {m: [] for m in MIS_NAMES}
+        for uu in UAV_NAMES:
+            for td, tf, mis in sol[uu]['bombs']:
+                mis_iv[mis] += intervals_of(UAVS[uu], sol[uu]['hd'], sol[uu]['sp'], td, tf, mis, dt=0.05)
+        tot_now = sum(union_length(v) for v in mis_iv.values())
+        hist_track.append(tot_now)
+t_ca = time.time() - tC
+tot_coarse = sum(union_length(v) for v in mis_iv.values())
+print(f"[阶段C2 逐机坐标上升] 粗网格总量 {tot_coarse:.3f}s（耗时{t_ca:.1f}s）")
+
+# ================= 阶段D：独立验证 =================
+tD = time.time()
+mis_iv_v = {m: [] for m in MIS_NAMES}
+rows = []
+for u in UAV_NAMES:
+    s = sol[u]
+    for bi, (td, tf, mis) in enumerate(s['bombs']):
+        iv, B, tb = shading_intervals(UAVS[u], s['hd'], s['sp'], td, tf, mis, dt=0.02, samples=SAMPLES_V, criterion='body')
+        du = union_length(iv)
+        mis_iv_v[mis] += iv
+        Pd = UAVS[u] + s['sp'] * td * np.array([np.cos(np.deg2rad(s['hd'])), np.sin(np.deg2rad(s['hd'])), 0.0])
+        rows.append((u, bi + 1, s['hd'], s['sp'], td, tf, mis, Pd, B, tb, du, iv))
+        print(f"  {u} 弹{bi+1}→{mis}: hd={s['hd']:.3f}° v={s['sp']:.2f} td={td:.4f} tf={tf:.4f} "
+              f"起爆t={tb:.3f} 遮蔽={du:.4f}s 区间={[(round(a,4),round(b,4)) for a,b in iv]}")
+per_mis = {m: union_length(mis_iv_v[m]) for m in MIS_NAMES}
+tau_total = sum(per_mis.values())
+print(f"[阶段D 独立验证] 各导弹并集: " + ", ".join(f"{m}={per_mis[m]:.4f}s" for m in MIS_NAMES) + f"  **总量 τ = {tau_total:.4f}s**")
+t_val = time.time() - tD
+
+# G5 边界哨兵
+flags = []
+for (u, bi, hd, sp, td, tf, mis, Pd, B, tb, du, iv) in rows:
+    if abs(sp - 70) < 0.05 or abs(sp - 140) < 0.05: flags.append(f"{u} v≈{sp:.1f}")
+    if tf - T_FUSE_MIN < 1e-3: flags.append(f"{u}弹{bi} tf贴界")
+    if td < 1e-3: flags.append(f"{u}弹{bi} td贴0")
+gaps_ok = True
+for u in UAV_NAMES:
+    tds = sorted(b[0] for b in sol[u]['bombs'])
+    for a, b in zip(tds, tds[1:]):
+        if b - a < 1.0 - 1e-6:
+            gaps_ok = False
+print(f"[G5 边界哨兵] 投放间隔全部≥1s: {gaps_ok}；" + ("⚠ " + "; ".join(flags) if flags else "其余参数不贴边"))
+
+# ================= 阶段E：G8 灵敏度 =================
+tE = time.time()
+print("\n[阶段E G8 灵敏度]")
+import common as C
+import solver as S2
+RB, SB = C.R_CLOUD, C.V_SINK
+for pname, key, val, lab in (('R', 'R', 9.0, '-10%'), ('R', 'R', 11.0, '+10%'),
+                             ('V_sink', 'S', 2.7, '-10%'), ('V_sink', 'S', 3.3, '+10%')):
+    if key == 'R':
+        C.R_CLOUD = val; S2.R_CLOUD = val
+    else:
+        C.V_SINK = val; S2.V_SINK = val
+    # 1 轮快速坐标上升
+    for u in UAV_NAMES:
+        if not sol[u]['bombs']:
+            continue
+        oc = {m: [] for m in MIS_NAMES}
+        for uu in UAV_NAMES:
+            if uu == u:
+                continue
+            for td, tf, mis in sol[uu]['bombs']:
+                oc[mis] += intervals_of(UAVS[uu], sol[uu]['hd'], sol[uu]['sp'], td, tf, mis, dt=0.1)
+        k = len(sol[u]['bombs'])
+        def neg_g(y, _u=u, _k=k, _oc=oc):
+            hdx = y[0] % 360.0
+            spx = 70.0 + 70.0 / (1.0 + np.exp(-y[1]))
+            tds = [y[2] ** 2]
+            for j in range(1, _k):
+                tds.append(tds[-1] + 1.0 + y[2 + j] ** 2)
+            bombs = [[tds[j], T_FUSE_MIN + y[2 + _k + j] ** 2, sol[_u]['bombs'][j][2]] for j in range(_k)]
+            return -total_with(_u, hdx, spx, bombs, _oc, dt=0.1)
+        y0 = [sol[u]['hd'], np.log(max(sol[u]['sp'] - 70, 1e-6) / max(140 - sol[u]['sp'], 1e-6)),
+              np.sqrt(max(sol[u]['bombs'][0][0], 1e-4))]
+        for j in range(1, k):
+            y0.append(np.sqrt(max(sol[u]['bombs'][j][0] - sol[u]['bombs'][j - 1][0] - 1.0, 1e-4)))
+        for j in range(k):
+            y0.append(np.sqrt(max(sol[u]['bombs'][j][1] - T_FUSE_MIN, 1e-4)))
+        xb3, fb3, _, _ = nelder_mead(neg_g, np.array(y0), max_iter=150, step=0.06)
+        hdx = xb3[0] % 360.0
+        spx = 70.0 + 70.0 / (1.0 + np.exp(-xb3[1]))
+        tds = [xb3[2] ** 2]
+        for j in range(1, k):
+            tds.append(tds[-1] + 1.0 + xb3[2 + j] ** 2)
+        sol[u]['hd'], sol[u]['sp'] = hdx, spx
+        for j in range(k):
+            sol[u]['bombs'][j][0] = tds[j]
+            sol[u]['bombs'][j][1] = T_FUSE_MIN + xb3[2 + k + j] ** 2
+    mis_iv_s = {m: [] for m in MIS_NAMES}
+    for uu in UAV_NAMES:
+        for td, tf, mis in sol[uu]['bombs']:
+            mis_iv_s[mis] += intervals_of(UAVS[uu], sol[uu]['hd'], sol[uu]['sp'], td, tf, mis, dt=0.1)
+    tot_s = sum(union_length(v) for v in mis_iv_s.values())
+    C.R_CLOUD, S2.R_CLOUD = RB, RB
+    C.V_SINK, S2.V_SINK = SB, SB
+    print(f"  {pname}{lab}({val}): 快速重优化总量 {tot_s:.2f}s")
+t_sens = time.time() - tE
+print(f"  （基准 {tau_total:.3f}s）")

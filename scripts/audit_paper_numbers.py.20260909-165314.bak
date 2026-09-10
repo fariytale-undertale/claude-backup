@@ -1,0 +1,197 @@
+# -*- coding: utf-8 -*-
+"""论文数字审计（G10 闸门工具）：抽取 LaTeX 正文全部数字，与"来源白名单"逐一对照，列出无来源数字。
+
+用法：
+  py -3.12 D:/scripts/audit_paper_numbers.py --tex paper/main.tex --init      # 首次/更新：生成或合并白名单骨架（新数字记 TODO）
+  py -3.12 D:/scripts/audit_paper_numbers.py --tex paper/main.tex             # 审计：已溯源 / 待溯源 / 白名单陈旧，待溯源>0 退出码 1
+  py -3.12 D:/scripts/audit_paper_numbers.py --tex paper/main.tex --out audit_report.txt
+
+白名单：默认与 tex 同目录的 numbers_whitelist.json，结构
+  {"numbers": {"0.5274": {"src": "q2_outputs.py K24 复算 print", "note": "u 交付显示值", "ctx": "…"}}}
+  src 以 TODO 开头 = 尚未溯源。匹配：字面相同优先，其次数值相等（0.50 == 0.5）。
+处理规则：
+  * 去注释；截掉参考文献节；删除 \\ref/\\label/\\cite/\\includegraphics/\\setlength 等非断言命令及其参数；
+    删除"表 4 / 图 9"式交叉引用与上标指数（m$^2$）；跳过（1）式列表标号。
+  * 默认跟随 \\input{tab_*.tex}（脚本生成的数据表）并自动记为已溯源；--no-follow 关闭。
+  * 白名单条目名可带 % 号：写 "15.5" 即可匹配正文的 15.5\\%。
+"""
+import argparse
+import datetime
+import json
+import os
+import re
+import sys
+
+SKIP_CMDS = (
+    "label", "ref", "eqref", "autoref", "pageref", "cite", "bibitem", "usepackage", "documentclass",
+    "geometry", "setlength", "addtolength", "hspace", "vspace", "url", "href", "include", "includeonly",
+    "bibliographystyle", "bibliography", "ctexset", "renewcommand", "newcommand", "definecolor",
+    "pagestyle", "fancyhead", "fancyfoot", "setcounter", "linespread", "setmainfont", "setCJKmainfont",
+    "zihao", "fontsize", "captionsetup", "hypersetup", "titleformat", "titlespacing", "graphicspath",
+)
+NUM = re.compile(r"(?<![\w.\\])\d+(?:\.\d+)?(?![\w.])")
+
+
+def read(p):
+    with open(p, encoding="utf-8") as f:
+        return f.read()
+
+
+def strip_comments(s):
+    out = []
+    for line in s.split("\n"):
+        buf = []
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == "\\" and i + 1 < len(line):
+                buf.append(line[i:i + 2])
+                i += 2
+                continue
+            if ch == "%":
+                break
+            buf.append(ch)
+            i += 1
+        out.append("".join(buf))
+    return "\n".join(out)
+
+
+def cut_bibliography(s):
+    m = re.search(r"\\section\*?\{参考文献\}|\\begin\{thebibliography\}", s)
+    return s[:m.start()] if m else s
+
+
+def follow_inputs(s, base_dir):
+    inputs = {}
+
+    def repl(m):
+        name = m.group(1).strip()
+        path = name if name.endswith(".tex") else name + ".tex"
+        p = os.path.join(base_dir, path)
+        if os.path.exists(p):
+            inputs[path] = read(p)
+        return " "
+
+    return re.sub(r"\\input\{([^}]*)\}", repl, s), inputs
+
+
+def clean(s):
+    s = re.sub(r"(\\[A-Za-z]+)(?=\d)", r"\1 ", s)   # \sim0.85 / \approx5.60 / \pm2 → 命令与数字分开
+    s = re.sub(r"\\includegraphics\s*(\[[^\]]*\])?\s*\{[^}]*\}", " ", s)
+    cmd = r"\\(?:%s)\*?\s*(\[[^\]]*\])?\s*\{[^}]*\}(\{[^}]*\})?(\{[^}]*\})?" % "|".join(SKIP_CMDS)
+    s = re.sub(cmd, " ", s)
+    s = re.sub(r"\\begin\{[^}]*\}\s*(\[[^\]]*\])?|\\end\{[^}]*\}", " ", s)
+    s = re.sub(r"\\multi(?:column|row)\{\d+\}\{[^}]*\}", " ", s)
+    s = re.sub(r"[图表式]\s*\d+", " ", s)
+    s = re.sub(r"\$\^\{?-?\d+\}?\$|\^\{?-?\d+\}?", " ", s)
+    return s
+
+
+def extract(s):
+    """返回 {literal: [ctx, ...]}，跳过（1）式列表标号"""
+    found = {}
+    for m in NUM.finditer(s):
+        st, en = m.start(), m.end()
+        if st > 0 and s[st - 1] == "（" and en < len(s) and s[en] == "）":
+            continue
+        ctx = s[max(0, st - 26):min(len(s), en + 26)]
+        ctx = re.sub(r"\s+", " ", ctx).strip()
+        found.setdefault(m.group(0), []).append(ctx)
+    return found
+
+
+def load_wl(path):
+    if os.path.exists(path):
+        return json.load(open(path, encoding="utf-8"))
+    return {"numbers": {}}
+
+
+def save_wl(path, wl):
+    wl["updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(wl, f, ensure_ascii=False, indent=1)
+
+
+def match_entry(literal, numbers):
+    if literal in numbers:
+        return literal, numbers[literal]
+    try:
+        v = float(literal)
+    except ValueError:
+        return None, None
+    for k, e in numbers.items():
+        try:
+            if abs(float(k) - v) < 1e-12:
+                return k, e
+        except ValueError:
+            continue
+    return None, None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tex", required=True)
+    ap.add_argument("--whitelist", default=None)
+    ap.add_argument("--init", action="store_true", help="生成/合并白名单骨架（新数字记 TODO，不覆盖已有 src）")
+    ap.add_argument("--no-follow", action="store_true", help="不跟随 \\input 表文件")
+    ap.add_argument("--out", default=None, help="报告写入文件")
+    a = ap.parse_args()
+
+    tex = os.path.abspath(a.tex)
+    base = os.path.dirname(tex)
+    wl_path = a.whitelist or os.path.join(base, "numbers_whitelist.json")
+
+    s = cut_bibliography(strip_comments(read(tex)))
+    inputs = {}
+    if not a.no_follow:
+        s, inputs = follow_inputs(s, base)
+    body = extract(clean(s))
+    auto = {}
+    for fn, content in inputs.items():
+        for lit, ctxs in extract(clean(strip_comments(content))).items():
+            auto.setdefault(lit, []).append(fn)
+
+    wl = load_wl(wl_path)
+    numbers = wl.setdefault("numbers", {})
+
+    if a.init:
+        added = 0
+        for lit, ctxs in sorted(body.items(), key=lambda kv: (len(kv[0]), kv[0])):
+            k, _ = match_entry(lit, numbers)
+            if k is None:
+                numbers[lit] = {"src": "TODO", "note": "", "ctx": ctxs[0], "n": len(ctxs)}
+                added += 1
+            else:
+                numbers[k]["n"] = len(ctxs)
+        save_wl(wl_path, wl)
+        print(f"白名单已写入 {wl_path}：新增 {added} 条 TODO，共 {len(numbers)} 条")
+        return 0
+
+    cleared, todo, lines = [], [], []
+    for lit, ctxs in sorted(body.items(), key=lambda kv: (len(kv[0]), kv[0])):
+        k, e = match_entry(lit, numbers)
+        if e is not None and not str(e.get("src", "TODO")).startswith("TODO"):
+            cleared.append((lit, k, e))
+        else:
+            todo.append((lit, len(ctxs), ctxs[:2], "白名单 TODO" if e is not None else "白名单无条目"))
+    stale = [k for k in numbers if all(match_entry(lit, {k: numbers[k]})[0] is None for lit in body)]
+
+    lines.append(f"=== 论文数字审计：{tex} ===")
+    lines.append(f"正文不同数字 {len(body)} 个（出现 {sum(len(v) for v in body.values())} 处）；"
+                 f"\\input 表数字 {len(auto)} 个（自动溯源：{', '.join(sorted(inputs)) or '无'}）")
+    lines.append(f"[已溯源] {len(cleared)} 个")
+    lines.append(f"[待溯源] {len(todo)} 个")
+    for lit, n, ctxs, why in todo:
+        lines.append(f"  {lit:>10}  ×{n:<3} {why}  | " + " ‖ ".join(ctxs))
+    lines.append(f"[白名单陈旧（正文已无）] {len(stale)} 个" + (": " + ", ".join(stale) if stale else ""))
+    lines.append("结论：" + ("PASS——全部数字有来源" if not todo else f"FAIL——{len(todo)} 个数字待溯源"))
+    report = "\n".join(lines)
+    print(report)
+    if a.out:
+        with open(a.out, "w", encoding="utf-8") as f:
+            f.write(report + "\n")
+    return 1 if todo else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

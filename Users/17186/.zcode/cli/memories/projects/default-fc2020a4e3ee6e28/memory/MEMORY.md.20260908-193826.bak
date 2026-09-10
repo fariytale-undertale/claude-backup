@@ -1,0 +1,20 @@
+# MEMORY.md
+
+- [用户画像：刘明峰（哈工大深圳·自动化·24级）](user-liu-mingfeng-hitsz.md) — 申请ROBOCON队电控组的agent工具重度用户，无竞赛经历，目标是工程经验+保研
+- [ROBOCON「女娲补天」招新申请](project-robocon-nvwa-application.md) — 26届规则V0要点与已交付的报名表答案（150字定稿），2026-08/09进行中
+- [ROBOCON 入队训练作业](project-robocon-training-homework.md) — HITSZ-WTRobot 2026作业仓库fork+PR交C作业/作业01本地实测PASS 4016、已push到fork(fariytale-undertale)待开PR/CI三态查看法已讲(待批准·✓4016·✗看FAIL日志)/github直连超时但clone可成
+- [配置文件先diff后改](feedback-diff-first-for-config.md) — 改AGENTS.md等个人配置前展示完整拟写入片段，明确确认后再写
+- [Word粘贴用纯正文](feedback-plain-text-for-word-paste.md) — 交付待粘贴文字禁用引用块/代码块，富文本底色会带进Word
+- [CUMCM 数值求解实战教训](lessons-cumcm-numerical-solver-pitfalls.md) — 首写断言网/NM五陷阱/零平台与粗网格伪影/跨问候选流通/绘图论文守卫/区间图裁剪/通栏列表/docx模板工作流
+- [外部基准对比方法论](methodology-external-benchmark-lessons.md) — 外部数字前置证伪机制上限/随机基线探完备性/MINLP形式化审约束/几何极值判据
+- [建模先行的竞赛方法论](modeling-first-competition-methodology.md) — 解析刻画优先于数值搜索/经验发现升格为命题/判据推导先行/可分离性命题化/Q2漂移窗口公式实证/算法逐族排除
+- [2025A 烟幕干扰弹项目](project-2025a-cumcm-smoke.md) — 五问结果(1.392/4.570/6.136/11.677/20.765s)与交付物位置/模板已补全官方规范/待决：重写规划确认与附录全量源码
+- [2023A 定日镜场项目](project-2023a-heliostat-cumcm.md) — 三问结果(0.6058/37.03MW; 60.57MW@0.5274; 60.62MW@0.5276)/行网格可行性发现/A165对比(余弦逐位互证,对方E未达额且~0.80折减)/修订轮后21页
+- [CUMCM 论文版面与行文偏好](feedback-cumcm-paper-writing-prefs.md) — 标题\Large规格/节号不留空/流程图分层逻辑流/括号克制前四章尤甚/编译零瑕疵
+- [LaTeX/MiKTeX 编译坑清单](latex-miktex-compile-pitfalls.md) — PATH 坏条目必崩/booktabs 与嵌套 tabular 失配/\input 表体首线禁 \hline/双日志核查/sed 与 heredoc 反斜杠陷阱
+- [CUMCM 论文格式偏好](cumcm-paper-format-preferences.md) — 摘要页三段式标题/节号连排/分层逻辑流程图中心对齐/括号削减句式
+- [流程图版式规范](flowchart-style-spec.md) — CUMCM 总体思路流程图最终版式：五段式逻辑流/三级嵌套颜色/中心对齐/正交连线/紧凑折行（2023A 七轮迭代收敛）/禁公式纯文字（2024A）
+- [Codex 中转站配置现状](codex-relay-provider-setup.md) — Codex 桌面版接 wow.wvv.pp.ua（gpt-5.6-sol，responses 协议）无官方订阅/DeepSeek 注入保留/应用重启改写 config.toml 与 auth.json，改前必重读
+- [2024A 板凳龙项目](project-2024a-baidenglong.md) — 五问结果(412.47s/0.450338m/L不变13.621245m/V_max=1.246266)/交付物位置/两处判据修正/A242对比G6闭合/四处修订已实施
+- [2024A求解四陷阱](lessons-baidenglong-solver-pitfalls.md) — 批量SAT轴序/热启动括号数据驱动/模板负索引/JSON反斜杠丢失（前三条已固化为prompt_glm.md O8–O10修订十二）
+- [STM32Cube VS Code 扩展环境](stm32cube-vscode-bundle-env.md) — cube.exe与bundle路径（不在PATH，在扩展目录与%LOCALAPPDATA%\stm32cube）/F103工程d:/STM32/led/BundleNotInstalledException=装完1.6s的解析竞态误报，Reload Window即愈/cpptools冲突双向策略：STM32工程工作区关C_Cpp.intelliSenseEngine（led已做）·非STM32的C工程反向禁用ST clangd扩展（无总开关，onLanguage:c激活一切含C文件夹）/Build Analyzer的DWARF5告警无害（GCC14.3默认DWARF5，备选-gdwarf-4已提出未实施）/st-arm-dwarfdump可查ELF/Ozone3.2.4+JLinkDLL7.52勿升级（防克隆拒绝）·当时无VID_1366调试器仅Keil板/msys64 gcc16.1可本机测C

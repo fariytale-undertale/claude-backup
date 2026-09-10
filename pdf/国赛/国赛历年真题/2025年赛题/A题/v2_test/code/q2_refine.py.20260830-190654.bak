@@ -1,0 +1,69 @@
+# -*- coding: utf-8 -*-
+"""Q2 降维 2D 精确优化：v=70, t_d=0 固定（单调性已证），(theta, tau) 两维。
+
+分层预算：粗扫 grid_dt=0.05 (3.1ms/次, ~30s) -> NM 精修 grid_dt=0.005 (22.5ms/次)。
+"""
+import sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) if '__file__' in dir() else '.')
+import os
+import numpy as np
+from scipy.optimize import minimize
+from core import burst_pos, T_HIT, CYL_PTS, shaded_intervals, union_length
+
+t0_all = time.time()
+t_hit = T_HIT['M1']
+
+def dur(theta, tau, gdt):
+    B = burst_pos('FY1', 0.0, tau, theta, 70.0)
+    if B[2] < 0:
+        return -1.0
+    return union_length(shaded_intervals(B, tau, 'M1', CYL_PTS, t_hit, grid_dt=gdt))
+
+# 阶段A: 粗扫（grid_dt=0.05）
+ths = np.radians(np.linspace(150, 210, 121))
+taus = np.linspace(1.0, 5.0, 81)
+best = (0.0, None)
+n_eval = 0
+for th in ths:
+    for tau in taus:
+        d = dur(th, tau, 0.05)
+        n_eval += 1
+        if d > best[0]:
+            best = (d, (th, tau))
+print(f"[粗扫] {n_eval} 点, {time.time()-t0_all:.1f}s, 最优 {best[0]:.4f}s @ "
+      f"th={np.degrees(best[1][0]):.3f} tau={best[1][1]:.3f}")
+
+# 阶段B: 多起点 NM（6 起点，grid_dt=0.005 精确评估）
+def neg(y):
+    th, tau = y
+    if tau <= 0.05:
+        return 10.0
+    d = dur(th % (2 * np.pi), tau, 0.005)
+    return -d if d > 0 else 10.0 + abs(d)
+
+rng = np.random.default_rng(3)
+wins = []
+for k in range(6):
+    if k == 0:
+        y0 = np.array(best[1])
+    else:
+        y0 = np.array([best[1][0] + rng.normal(0, 0.02), best[1][1] + rng.normal(0, 0.2)])
+    res = minimize(neg, y0, method='Nelder-Mead',
+                   options={'maxfev': 600, 'xatol': 1e-7, 'fatol': 1e-10})
+    wins.append((-res.fun, res.x.copy()))
+    print(f"[NM{k}] {-res.fun:.6f}s @ th={np.degrees(res.x[0]%(2*np.pi)):.4f} tau={res.x[1]:.5f}")
+wins.sort(key=lambda w: -w[0])
+d_star, (th_star, tau_star) = wins[0]
+
+# 阶段C: 邻域加密确认（无更高点才收工）
+nb_best = 0.0
+for dth in np.linspace(-0.02, 0.02, 5):
+    for dtau in np.linspace(-0.05, 0.05, 5):
+        nb_best = max(nb_best, dur(th_star + dth, tau_star + dtau, 0.005))
+print(f"[邻域确认] 邻域最高 {nb_best:.6f} vs 解 {d_star:.6f} "
+      f"({'OK' if nb_best <= d_star + 1e-4 else '警告: 邻域更高'})")
+
+print(f"\n[Q2最终] theta = {np.degrees(th_star)%360:.4f} deg, v = 70.0000 m/s, "
+      f"t_d = 0.0000 s, tau = {tau_star:.5f} s")
+print(f"[Q2最终] 体判据遮蔽时长 = {d_star:.6f} s")
+print(f"总耗时 {time.time()-t0_all:.1f}s")

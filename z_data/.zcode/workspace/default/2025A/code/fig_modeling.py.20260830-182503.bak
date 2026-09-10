@@ -1,0 +1,98 @@
+# -*- coding: utf-8 -*-
+"""论文建模性图：① 遮蔽判据示意图（建模准备）② 总体思路流程图（问题分析）。"""
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import numpy as np
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import plotstyle as ps
+ps.set_figdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'output', 'figures'))
+
+# ============ 图1 遮蔽判据示意图 ============
+fig, ax = plt.subplots(figsize=(8.2, 4.4))
+# 目标圆柱（侧视：矩形）
+ax.add_patch(mpatches.Rectangle((8.6, 0), 0.9, 2.0, fc='slategray', alpha=0.55, ec='k', lw=1))
+ax.text(9.05, 2.25, '真目标（圆柱 r=7, h=10）', ha='center', fontsize=10)
+ax.text(9.05, -0.42, '采样点集 $\\{q_j\\}$（上下底圆周+侧面网格）', ha='center', fontsize=9)
+# 导弹
+ax.scatter(0.6, 2.9, marker='>', s=160, color='crimson', zorder=5)
+ax.text(0.6, 3.2, '导弹 $M(t)$', ha='center', fontsize=10, color='crimson')
+# 云团
+cloud = mpatches.Circle((5.2, 2.05), 0.85, fc='royalblue', alpha=0.28, ec='royalblue', lw=1.4)
+ax.add_patch(cloud)
+ax.scatter(5.2, 2.05, color='royalblue', s=18, zorder=5)
+ax.annotate('云团球 $C(t)$，半径 $R$', xy=(5.75, 2.55), xytext=(5.9, 3.15),
+            fontsize=10, arrowprops=dict(arrowstyle='->', lw=0.9))
+# 视线：到上/中/下采样点
+for qy, lab, sty in ((1.9, '上缘视线（被截断）', '-'), (1.0, '下缘视线（未被截断）', '--')):
+    qq = np.array([9.05, qy])
+    m = np.array([0.6, 2.9])
+    d = qq - m
+    t_hit = None
+    # 求与云团圆交点参数
+    f = m - np.array([5.2, 2.05])
+    a = d @ d; b = 2 * f @ d; c = f @ f - 0.85 ** 2
+    disc = b * b - 4 * a * c
+    if disc >= 0:
+        t1 = (-b - np.sqrt(disc)) / (2 * a)
+        t_hit = t1
+    ts = np.linspace(0, 1, 100)
+    pts = m[None, :] + ts[:, None] * d[None, :]
+    if t_hit is not None and sty == '-':
+        ax.plot(pts[:, 0], pts[:, 1], color='seagreen', lw=1.6)
+        p1 = m + t_hit * d
+        ax.plot([p1[0], qq[0]], [p1[1], qq[1]], color='seagreen', lw=1.0, ls=':', alpha=0.65)
+    else:
+        ax.plot(pts[:, 0], pts[:, 1], color='darkorange', lw=1.6, ls=sty)
+    ax.scatter(*qq, color='k', s=14, zorder=5)
+ax.text(4.0, 2.62, 'dist$(C,\\,\\mathrm{seg}[M,q_j])\\leq R$ ?', fontsize=11,
+        bbox=dict(fc='white', ec='gray', alpha=0.9))
+ax.text(3.0, 1.35, '全部采样点视线被截断 $\\Rightarrow$ 有效遮蔽（体判据）',
+        fontsize=10, color='seagreen')
+ax.text(6.6, 0.72, '任一视线漏判 $\\Rightarrow$ 不计（更严格）', fontsize=9, color='darkorange')
+ax.set_xlim(0, 10.6); ax.set_ylim(-0.7, 3.6)
+ax.set_xlabel('水平距离（示意）'); ax.set_ylabel('高度（示意）')
+ax.set_title('遮蔽判定原语：云心到视线段距离 ≤ 云团半径（含端点）')
+ps.save(fig, 'fig_criterion.png')
+
+# ============ 图2 总体思路流程图 ============
+fig, ax = plt.subplots(figsize=(9.6, 6.2))
+ax.axis('off')
+
+def box(x, y, w, h, text, fc='#eaf2fb', ec='#39628f', fs=9.5):
+    b = mpatches.FancyBboxPatch((x, y), w, h, boxstyle='round,pad=0.02',
+                                fc=fc, ec=ec, lw=1.1)
+    ax.add_patch(b)
+    ax.text(x + w / 2, y + h / 2, text, ha='center', va='center', fontsize=fs)
+
+def arrow(x1, y1, x2, y2):
+    ax.annotate('', xy=(x2, y2), xytext=(x1, y1),
+                arrowprops=dict(arrowstyle='-|>', lw=1.2, color='#39628f'))
+
+box(0.30, 0.90, 0.40, 0.075, '运动学建模：无人机匀速直线 / 弹抛体 / 云团匀速下沉 / 导弹直线', '#fdf3e3', '#b8860b')
+box(0.30, 0.76, 0.40, 0.075, '遮蔽判据：体判据（108 采样点视线全截断）+ 点判据对比\n区分性测试验证两抽象层可区分', '#eaf2fb')
+box(0.05, 0.60, 0.26, 0.075, '问题一\n给定参数正问题', '#e8f6e8', '#3a7d44')
+box(0.37, 0.60, 0.26, 0.075, 'G-Cost 求解框架\n形态诊断→全域粗扫→结构热起点\n→多起点 NM→独立网格验证')
+box(0.69, 0.60, 0.26, 0.075, '问题二\n单弹 4 维优化\n（全航向 28800 点粗扫）')
+arrow(0.5, 0.90, 0.5, 0.835)
+arrow(0.5, 0.76, 0.18, 0.675)
+arrow(0.5, 0.76, 0.5, 0.675)
+arrow(0.5, 0.76, 0.82, 0.675)
+box(0.05, 0.44, 0.26, 0.075, '问题三\n同机三弹并集\n（8 维联合 NM）', '#e8f6e8')
+box(0.37, 0.44, 0.26, 0.075, '问题四\n三机各一弹\n逐机个体+坐标上升', '#e8f6e8')
+box(0.69, 0.44, 0.26, 0.075, '问题五\n能力矩阵（15 对，走廊构造起点）\n公平+贪心指派（共享航向评估）', '#e8f6e8')
+arrow(0.18, 0.60, 0.18, 0.515)
+arrow(0.5, 0.60, 0.5, 0.515)
+arrow(0.82, 0.60, 0.82, 0.515)
+arrow(0.31, 0.4775, 0.37, 0.4775)
+arrow(0.63, 0.4775, 0.69, 0.4775)
+box(0.20, 0.28, 0.60, 0.075, '问题五续：窄网格精定位 → 逐机坐标上升（共享 $\\theta,v$）\n→ 多弹扩展检查 → 跨问子解复用（问题三三弹构型）', '#e8f6e8')
+arrow(0.82, 0.44, 0.6, 0.355)
+box(0.12, 0.10, 0.76, 0.095, '检验链：网格与采样收敛 · 求解-验证网格分离 · $\pm$10% 灵敏度与决策稳定性 ·
+边界最优性核查 · 外部基准对照 · 结果文件回读复算 · 跨问一致性 · 独立实现复算',
+    '#f3e8f6', '#7d3a7d')
+ax.set_title('总体求解思路', fontsize=11.5)
+ax.set_title('总体求解思路（判据闸门口径经用户确认；全部数字来自脚本输出）', fontsize=11.5)
+ax.set_xlim(0, 1); ax.set_ylim(0.05, 1.0)
+ps.save(fig, 'fig_flow.png')
+print("建模性图生成完毕")

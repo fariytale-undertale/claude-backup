@@ -1,0 +1,81 @@
+# -*- coding: utf-8 -*-
+"""result 模板填写共享工具：行标签解析 + 位置/速度表填写。"""
+import re
+import numpy as np
+import openpyxl
+
+
+def handle_of(lab):
+    """模板行标签 -> 把手编号（0=龙头前把手, 1..221=第k节龙身前把手,
+    222=龙尾前把手, 223=龙尾后把手）。无法解析返回 None。"""
+    if lab is None:
+        return None
+    if lab.startswith("龙头"):
+        return 0
+    if lab.startswith("龙尾（后）"):
+        return 223
+    if lab.startswith("龙尾"):
+        return 222
+    m = re.match(r"^第(\d+)节龙身", lab)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _time_cols(ws):
+    cols = {}
+    for c in range(2, ws.max_column + 1):
+        lab = ws.cell(row=1, column=c).value
+        if lab is None:
+            continue
+        cols[int(str(lab).replace("s", "").strip())] = c
+    return cols
+
+
+def fill_posvel(src, dst, X, V, times):
+    """填写 位置/速度 双表模板。X: {t: (224,2)}, V: {t: (224,)}（按需提供时刻）。
+    times: 需要填写的整秒列表。"""
+    wb = openpyxl.load_workbook(src)
+    ws_pos, ws_vel = wb["位置"], wb["速度"]
+    tcol, tcolv = _time_cols(ws_pos), _time_cols(ws_vel)
+    assert len(tcol) == len(times) and len(tcolv) == len(times)
+    n_pos = n_vel = 0
+    for r in range(2, ws_pos.max_row + 1):
+        lab = ws_pos.cell(row=r, column=1).value
+        k = handle_of(lab)
+        if k is None:
+            continue
+        n_pos += 1
+        isy = "y" in lab
+        for t in times:
+            ws_pos.cell(row=r, column=tcol[t]).value = \
+                round(float(X[t][k, 1 if isy else 0]), 6) + 0.0
+    for r in range(2, ws_vel.max_row + 1):
+        k = handle_of(ws_vel.cell(row=r, column=1).value)
+        if k is None:
+            continue
+        n_vel += 1
+        for t in times:
+            ws_vel.cell(row=r, column=tcolv[t]).value = \
+                round(float(V[t][k]), 6) + 0.0
+    assert n_pos == 224 and n_vel == 224, f"行数异常: pos={n_pos}, vel={n_vel}"
+    wb.save(dst)
+    return dst
+
+
+def fill_xyv(src, dst, X, v):
+    """填写单表 x/y/v 模板（result2）。X (224,2), v (224,)。"""
+    wb = openpyxl.load_workbook(src)
+    ws = wb[wb.sheetnames[0]]
+    n = 0
+    for r in range(2, ws.max_row + 1):
+        k = handle_of(ws.cell(row=r, column=1).value)
+        if k is None:
+            continue
+        n += 1
+        ws.cell(row=r, column=2).value = round(float(X[k, 0]), 6) + 0.0
+        ws.cell(row=r, column=3).value = round(float(X[k, 1]), 6) + 0.0
+        ws.cell(row=r, column=4).value = round(float(v[k]), 6) + 0.0
+    assert n == 224, f"行数异常: {n}"
+    wb.save(dst)
+    return dst

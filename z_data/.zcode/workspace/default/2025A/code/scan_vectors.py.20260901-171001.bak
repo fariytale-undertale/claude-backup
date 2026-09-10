@@ -1,0 +1,13 @@
+# -*- coding: utf-8 -*-
+"""扫描 main.tex 中含向量记号的公式片段。"""
+import io, re
+
+P = r'D:\z_data\.zcode\workspace\default\2025A\paper\main.tex'
+s = io.open(P, encoding='utf-8').read()
+tokens = ['P_d', r'\bB\b', 'C(t)', 'M_1(t)', 'M_1(0)', 'M_i(t)', 'q_j', r'\\hat u', 'e_z',
+          'U_0', 'x=(', r'max_\{x\}', r'tau\(x\)']
+maths = set(re.findall(r'\$[^$]+\$', s))
+hits = sorted({m for m in maths if any(re.search(t, m) for t in tokens)})
+for h in hits:
+    print(repr(h))
+print('--- 共', len(hits), '个片段')
